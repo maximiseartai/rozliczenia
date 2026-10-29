@@ -4,7 +4,7 @@
 FAIL PR #624 (parser regex nie odtwarzał, co GitHub renderuje jako kod, znacznik spoza listy wierszowych kończył
 linię, a akapit w nagłówku, ``<summary>`` albo tabeli zamykał) i przypadki brzegowe. ``PRAWDZIWE`` to scalone PR-y z bazą ``main``, których issues z „Naprawia” zostawały
 otwarte przed #624, z numerami, które narzędzie ma zamknąć. ``SCALENIE`` to opisy testów przepływu
-``tools/scal_pr.py``. Numery to prawdziwe issues i PR-y tego repo, bo renderer odróżnia je po ich stanie na GitHubie
+``tools/scal_pr.py``, z nagłówkami wzoru skilla ``pr`` (``wzor``). Numery to prawdziwe issues i PR-y tego repo, bo renderer odróżnia je po ich stanie na GitHubie
 (``data-hovercard-type``).
 
 ``opisy_pr.json`` trzyma opisy ``PRAWDZIWE`` i HTML każdego opisu z ``gh api markdown`` (``mode=gfm``, ``context``
@@ -113,17 +113,21 @@ PRZYPADKI: tuple[tuple[str, str, tuple[int, ...]], ...] = (
     ("akapit-w-section", "<section>\n\nNaprawia #490\n\n</section>", ()),
     ("przypis", "Opis[^1]\n\n[^1]: Naprawia #490", ()),
     ("akapit-w-dd", "<dl><dd>\n\nNaprawia #490\n\n</dd></dl>", ()),
-    ("dd-w-punkcie-listy", "- <dl><dd>Naprawia #490</dd></dl>", ()),
+    ("dd-w-punkcie-listy", "- <dl><dd>Naprawia #490</dd></dl>po wdrożeniu", ()),
     ("lista-w-cytacie", "> - Naprawia #490", ()),
     ("punkty-listy-zadan", "- [x] Naprawia #490\n- [ ] Naprawia #491\n- Naprawia #492", (492,)),
+    ("link-przed-naprawia", "[Naprawia](https://example.com) #490", ()),
     ("obrazek-przed-naprawia", "![x](https://example.com/a.png) Naprawia #490\n\nNaprawia #491", (491,)),
     ("cytat", "> Naprawia #490", ()),
     ("alert", "> [!NOTE]\n> Naprawia #490\n\nNaprawia #491", (491,)),
     ("alert-w-punkcie-listy-to-cytat", "- > [!WARNING]\n  > Naprawia #490", ()),
     ("przekreslenie", "~~Naprawia #490~~", ()),
     ("przekreslony-numer", "Naprawia ~~#490~~, #491", ()),
+    ("przekreslony-numer-w-s", "Naprawia <s>#490</s>, #491", ()),
+    ("przekreslony-numer-w-strike", "Naprawia <strike>#490</strike>, #491", ()),
     ("przekreslenie-przez-koniec-wiersza", "~~Ten PR\nnie~~ Naprawia #490", ()),
     ("kod-przez-br", "Ten PR <code>nie<br>x</code> Naprawia #490", ()),
+    ("kod-przez-br-ze-spacja", "Ten PR <code>nie<br> </code>Naprawia #490", ()),
     ("komentarz-html", "Opis\n<!-- Naprawia #490 -->", ()),
     ("komentarz-html-w-kilku-liniach", "<!--\nNaprawia #490\n-->\nNaprawia #491", (491,)),
     ("niedomkniety-komentarz-html", "Opis\n\n<!-- niedomknięty\nNaprawia #490", ()),
@@ -170,12 +174,20 @@ PRAWDZIWE = {
     534: (490, 491),
     535: (533,),
 }
+
+
+def wzor(why: str) -> str:
+    """Opis z nagłówkami wzoru skilla ``pr``, bez których ``tools/scal_pr.py`` nie scala, z ``why`` w ``## Why``."""
+
+    return f"## Why\n\n{why}\n\n## Summary\n\nSzkic.\n\n## Evidence\n\n- **Before:** FAIL\n  **After:** OK\n\n## Merge Danger\n\n**Door:** two-way\n"
+
+
 SCALENIE = {
-    "zamyka": "Naprawia #3, #4\nNaprawia #5\nNaprawia #1\nCloses #7\nNaprawia #7\nNaprawia inny/repo#8, #6\n",
-    "jedno": "Naprawia #3",
-    "dwa": "Naprawia #3, #4",
-    "porazki": "Naprawia #14, #3, #10, #11, #12, #13",
-    "bez-commitu-merge": "Naprawia #3, #5, #15",
+    "zamyka": wzor("Naprawia #3, #4\nNaprawia #5\nNaprawia #1\nCloses #7\nNaprawia #7\nNaprawia inny/repo#8, #6"),
+    "jedno": wzor("Naprawia #3"),
+    "dwa": wzor("Naprawia #3, #4"),
+    "porazki": wzor("Naprawia #14, #3, #10, #11, #12, #13"),
+    "bez-commitu-merge": wzor("Naprawia #3, #5, #15"),
 }
 
 
