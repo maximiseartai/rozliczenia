@@ -6,7 +6,8 @@
 - Kod i testy: zanim napiszesz albo zrecenzujesz kod (także w `tools/`, `frontend/` i skryptach skilli) albo test, przeczytaj [`CODING_STANDARDS.md`](CODING_STANDARDS.md).
 - Model domeny i reguły procesu: przeczytaj [`GLOSSARY.md`](GLOSSARY.md) oraz właściwe ADR-y w [`docs/adr/`](docs/adr/).
 - Tytuł i opis PR: napisz według skilla [`.agents/skills/pr/SKILL.md`](.agents/skills/pr/SKILL.md), także zamiast osobistego `/pr`, a gdy wzorowi czegoś brakuje, dopisz to do skilla.
-- Przegląd PR: zanim napiszesz werdykt albo zlecisz przegląd, przeczytaj [`docs/agents/przeglad.md`](docs/agents/przeglad.md).
+- Przed pushem: przejrzyj swój diff skillem [`przeglad`](.agents/skills/przeglad/SKILL.md) w trybie autora.
+- Przegląd PR: zanim napiszesz werdykt albo zlecisz przegląd, użyj skilla [`przeglad`](.agents/skills/przeglad/SKILL.md) w trybie recenzenta.
 - Skille: przeczytaj [`docs/agents/skille.md`](docs/agents/skille.md) przed pushem i przed utworzeniem albo zmianą skilla.
 - Wydajność i środowisko taty: przy pomiarach wydajności albo decyzjach zależnych od jego sprzętu lub OneDrive przeczytaj [`docs/agents/komputer-taty.md`](docs/agents/komputer-taty.md).
 - Uruchamianie narzędzia przez człowieka: użyj [`README.md`](README.md).
