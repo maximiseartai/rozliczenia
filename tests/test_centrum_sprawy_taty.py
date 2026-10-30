@@ -19,7 +19,7 @@ from rozliczenia.centrum.dad_cases import DAD_CASES_FILE, NOTE, OLD_NOTES_FILE, 
 from rozliczenia.centrum.dad_notes import after_delivery, with_logs
 from rozliczenia.centrum.keyed_box import KeyedBox
 from rozliczenia.centrum.log import CentrumLog
-from rozliczenia.centrum.outbox import KnownIssue, NewIssue, Outbox, PeriodThread, Post
+from rozliczenia.centrum.outbox import LOCK_FILE, KnownIssue, NewIssue, Outbox, PeriodThread, Post
 from rozliczenia.centrum.report_box import (
     Closure,
     CommentOutcome,
@@ -482,7 +482,13 @@ def test_sprawa_bez_czasow_i_z_polskimi_literami_wraca_z_pliku_bez_zmian(tmp_pat
 
 def _outbox(tmp_path: Path) -> Outbox:
     clock = ManualClock()
-    return Outbox(tmp_path / "kolejka", KeyedBox(AnsweringBox({}), lambda: None, clock=clock), log(tmp_path), clock=clock)
+    return Outbox(
+        tmp_path / "kolejka",
+        KeyedBox(AnsweringBox({}), lambda: None, clock=clock),
+        log(tmp_path),
+        clock=clock,
+        lock=tmp_path / LOCK_FILE,
+    )
 
 
 PINNED_ID = "0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d"

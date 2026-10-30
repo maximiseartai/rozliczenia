@@ -7,17 +7,21 @@ Centrum nieosiągalna rozsądnym kosztem.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import threading
 
 import pytest
 
 from rozliczenia.centrum.keyed_box import KeyedBox
 from rozliczenia.centrum.log import CentrumLog
-from rozliczenia.centrum.outbox import RETRY_S, Frame, NewIssue, Outbox, PeriodThread, Post, ReportIssue
+from rozliczenia.centrum.outbox import LOCK_FILE, RETRY_S, Frame, NewIssue, Outbox, PeriodThread, Post, ReportIssue
 from rozliczenia.centrum.report_box import COMMENT_LIMIT, Refused, Rejected, Unreachable
 
+from tests.fixtures import kolejka_procesu
 from tests.fixtures.centrum import FakeIssue, FakeReportBox
 from tests.fixtures.clock import ManualClock
 from tests.fixtures.potomne import wait_for
@@ -55,6 +59,7 @@ class Queue:
 
     def __init__(self, tmp_path: Path, box: FakeReportBox, key: str | None = KEY) -> None:
         self.directory = tmp_path / "config" / "zgloszenia" / "kolejka"
+        self.lock = tmp_path / "config" / LOCK_FILE
         self.log_path = tmp_path / "logs" / "centrum-rozliczen.log"
         self.box = box
         self.key = key
@@ -71,6 +76,7 @@ class Queue:
             keyed,
             CentrumLog(self.log_path),
             clock=self.clock,
+            lock=self.lock,
             on_delivered=lambda post, number: self.delivered.append((post.run_id, number)),
         )
 
@@ -397,20 +403,59 @@ def test_druga_kolejka_na_tym_folderze_nie_wysyla_pliku_w_trakcie_wysylki_pierws
     assert queue.files() == []
 
 
-def test_przejscie_pominiete_przez_druga_kolejke_robi_pierwsza_po_swoim(tmp_path: Path) -> None:
+def test_kolejka_ktora_zastala_przejscie_innej_wysyla_sama_po_minucie(tmp_path: Path) -> None:
+    # Przejście starego procesu Centrum staje bez sieci, a jego budzik ginie z nim: nowy proces ma nowy zegar.
     hold = threading.Event()
     queue = Queue(tmp_path, FakeReportBox(open_hold=hold, outcomes=[Unreachable()]))
     queue.queued("treść\n")
     queue.outbox.resume()
     assert queue.box.opening.wait(30)
+    queue.clock = ManualClock()
     restarted = queue.restarted()
     restarted.resume()
     assert not restarted.wait_delivered("", THREAD.label, timeout_s=30)
-
     hold.set()
+    queue.passed()
+    assert (queue.box.issues, queue.clock.wakes) == ([], 1)
+
+    queue.clock.advance(RETRY_S)
 
     assert queue.box.wait_until(lambda box: len(box.issues) == 1)
     assert wait_for(lambda: queue.files() == [])
+
+
+def test_kolejka_nowego_procesu_centrum_nie_wysyla_w_trakcie_przejscia_starego_i_okres_ma_jedno_issue(
+    tmp_path: Path,
+) -> None:
+    # Stary proces po zamknięciu portu jeszcze kończy pracę, a jego kolejka szuka issue okresu; nowe Centrum już startuje.
+    queue = Queue(tmp_path, FakeReportBox())
+    queue.queued("treść\n")
+    command = [
+        sys.executable,
+        "-m",
+        kolejka_procesu.__name__,
+        str(queue.directory),
+        str(queue.lock),
+        str(tmp_path / "stare-centrum.log"),
+    ]
+    environment = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    with subprocess.Popen(
+        command, cwd=ROOT, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    ) as old:
+        try:
+            assert old.stdout is not None
+            assert old.stdout.readline() == "szuka\n"
+            queue.outbox.resume()
+            queue.passed()
+            searched = list(queue.box.listed)
+            said, _ = old.communicate("\n", timeout=60)
+        finally:
+            old.kill()
+    queue.clock.advance(RETRY_S)
+    queue.passed()
+
+    assert (searched, said) == ([], "issue: 1\n")
+    assert (queue.box.listed, queue.box.issues, queue.files()) == ([], [], [])
 
 
 def test_wysylka_dodana_w_trakcie_przejscia_wychodzi_bez_kolejnego_budzenia(tmp_path: Path) -> None:
@@ -574,7 +619,7 @@ def test_wyslanej_wysylki_ktorej_nie_da_sie_usunac_skrzynka_nie_dostaje_drugi_ra
     assert wait_for(lambda: failed_removals() == 1)
     queue.outbox.post(post(["druga\n"]))
     assert wait_for(lambda: failed_removals() == 2)
-    queue.passed()  # inaczej nowa kolejka zastaje przejście tej i oddaje mu swoje (outbox._claimed)
+    queue.passed()  # inaczej nowa kolejka zastaje blokadę przejścia tej i czeka na budzenie za RETRY_S
     queue.restarted().resume()
     assert wait_for(lambda: failed_removals() == 4)
     monkeypatch.setattr(Path, "unlink", unlink)

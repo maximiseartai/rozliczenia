@@ -20,7 +20,7 @@ from rozliczenia.centrum import update_messages
 from rozliczenia.centrum.keyed_box import KeyedBox, read_report_key
 from rozliczenia.centrum.log import CentrumLog
 from rozliczenia.centrum.dad_cases import DAD_CASES_FILE, NOTE, REPORT, Case, DadCases
-from rozliczenia.centrum.outbox import RETRY_S, Outbox, Post, ReportIssue
+from rozliczenia.centrum.outbox import LOCK_FILE, RETRY_S, Outbox, Post, ReportIssue
 from rozliczenia.centrum.report_box import IssuesOutcome, Label, Refused, Unreachable
 from rozliczenia.centrum.reports import (
     SEARCH_DEADLINE_S,
@@ -76,8 +76,8 @@ class Computer:
 
     ``outbox`` to kolejka Skrzynki ostatniego startu. Każdy kolejny start ma nowy zegar, jak nowy proces Centrum:
     budzik kolejki poprzedniego startu już nie dzwoni. Z tego samego powodu kolejny start czeka na koniec przejścia
-    kolejki poprzedniego: kolejka, która zastałaby przejście poprzedniej na tym samym folderze, oddałaby jej swoje
-    (``outbox._claimed``).
+    kolejki poprzedniego: kolejka, która zastałaby blokadę przejścia poprzedniej na tym samym folderze, nie wysłałaby
+    nic aż do budzenia za ``RETRY_S``.
     """
 
     tmp_path: Path
@@ -112,6 +112,7 @@ class Computer:
             keyed,
             self.log,
             clock=self.clock,
+            lock=self.config / LOCK_FILE,
             on_delivered=lambda post, number: reports.delivered(post, number),
         )
         stored = DadCases(self.config, self.log, pause=self.clock.pause)

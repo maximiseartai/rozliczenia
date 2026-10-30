@@ -42,7 +42,7 @@ from rozliczenia.centrum.period_board import periods_router
 from rozliczenia.centrum.platform import Platform
 from rozliczenia.centrum.keyed_box import KeyedBox, read_report_key
 from rozliczenia.centrum.report_box import GitHubReportBox, ReportBox
-from rozliczenia.centrum.outbox import ADDRESSES_FILE, QUEUE_DIRECTORY, Outbox, Post
+from rozliczenia.centrum.outbox import ADDRESSES_FILE, LOCK_FILE, QUEUE_DIRECTORY, Outbox, Post
 from rozliczenia.centrum.quantity_check_run import QuantityCheckAfterRun
 from rozliczenia.centrum.reports import SEARCH_DEADLINE_S, UNSENT_DIRECTORY, Reports
 from rozliczenia.centrum.preparation_run import PreparationEntry
@@ -204,6 +204,7 @@ def create_app(
         box,
         log,
         clock=clock,
+        lock=config / LOCK_FILE,
         on_delivered=delivered,
         on_rejected=rejected,
         prepare=lambda post: with_logs(post, cases, run_logs_address, run_logs_rejected),
