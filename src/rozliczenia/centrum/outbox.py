@@ -5,8 +5,9 @@ na początku treści issue, tytuł i co z issue, które Maks zamknął), do nowe
 jak Uwaga taty), do issue o znanym numerze (``KnownIssue``) albo do jednego otwartego Zgłoszenia problemu
 (``ReportIssue``: wiersz odcisku problemu w treści i tytuł). Najpierw trafia do własnego pliku JSON w
 ``config/zgloszenia/kolejka/`` (poza Gitem), potem jeden wątek w tle wysyła wszystkie pliki po kolei i usuwa
-wysłane. Porażka (brak klucza, odmowa, brak sieci) zostawia plik bez Komunikatu; wątek rusza znów sam po
-``RETRY_S``, przy starcie Centrum (``resume``) i po każdej nowej wysyłce. Plik do ``KnownIssue``, którego skrzynka
+wysłane. Porażka (brak klucza, odmowa, brak sieci) i plik, którego nie da się odczytać (coś trzyma go otwarty),
+zostawiają plik bez Komunikatu; wątek rusza znów sam po ``RETRY_S``, przy starcie Centrum (``resume``) i po każdej
+nowej wysyłce. Plik do ``KnownIssue``, którego skrzynka
 już nie ma, kolejka porzuca z linią dziennika (#402). Wysłany plik dostaje znacznik dostarczenia, zanim zniknie,
 więc plik, którego nie da się usunąć, nie idzie drugi raz. Przerwanie między wysłaniem a znacznikiem powtarza
 wysyłkę (co najmniej raz, decyzja 12). Treść nigdy nie trafia do dziennika Centrum: tylko etykieta, okres, numer
@@ -308,12 +309,13 @@ def _parse(text: str) -> _Queued | None:
 
 
 def _queued(path: Path) -> _Queued | None:
-    """Plik kolejki; pliku, którego nie da się odczytać, nie ma w tym przejściu."""
+    """Plik kolejki; uszkodzonego pliku nie ma w tym przejściu. Plik, którego nie da się odczytać, to ``OSError``."""
 
     try:
-        return _parse(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError):
+        text = path.read_text(encoding="utf-8")
+    except UnicodeError:
         return None
+    return _parse(text)
 
 
 def _string(value: object) -> str:
@@ -508,9 +510,10 @@ class Outbox:
     Dwie kolejki jednego folderu w tym procesie nie wysyłają naraz (``_claimed``): kolejka, która zastanie przejście
     drugiej, nie wysyła nic, a druga po swoim przejściu robi następne.
 
-    Przejście, które stanęło na przyczynie dla całej kolejki, nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba
-    że już jest nastawione; budzenie rusza wysyłkę w tle. Odrzucona treść i wysyłka czekająca w ``prepare`` budzenia
-    nie nastawiają: ponowienie im nie pomoże. Linia „skrzynka-czeka” trafia do dziennika tylko przy zmianie przyczyny
+    Przejście, które stanęło na przyczynie dla całej kolejki albo pominęło plik, którego nie dało się odczytać,
+    nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba że już jest nastawione; budzenie rusza wysyłkę w tle.
+    Odrzucona treść, uszkodzony plik i wysyłka czekająca w ``prepare`` budzenia nie nastawiają: ponowienie im nie
+    pomoże. Linia „skrzynka-czeka” trafia do dziennika tylko przy zmianie przyczyny
     (zeruje ją każde dostarczenie i przejście do końca), bo budzenie co minutę zapełniłoby ostatnie wpisy, które niesie
     Diagnoza.
     """
@@ -542,6 +545,7 @@ class Outbox:
         self._again = False
         self._retry_armed = False
         self._stopped_on: WaitingCause | None = None  # tylko wątek kolejki
+        self._unread = False  # przejście pominęło plik, którego nie dało się odczytać; tylko wątek kolejki
         self._first_comments: dict[tuple[str, Label], str | None] = {} if addresses is None else _read_addresses(addresses)
         self._undeleted: set[str] = set()  # wysłane w tej pracy Centrum, usunięcie się nie udało i jest w dzienniku
         self._unreadable: set[str] = set()  # nieczytelne, już w dzienniku tej pracy Centrum
@@ -638,7 +642,7 @@ class Outbox:
             with self._changed:
                 if not self._again:
                     self._draining = False
-                    if self._stopped_on is not None and not self._retry_armed:
+                    if (self._stopped_on is not None or self._unread) and not self._retry_armed:
                         self._retry_armed = True
                         self._clock.after(RETRY_S, self._woken)
                     self._changed.notify_all()
@@ -653,16 +657,22 @@ class Outbox:
     def _send_all(self) -> None:
         """Pliki kolejki po nazwie (czas utworzenia); porażka skrzynki zatrzymuje przejście albo pomija plik (``_waiting``).
 
-        ``_stopped_on`` to potem przyczyna, na której przejście stanęło, albo ``None``.
+        ``_stopped_on`` to potem przyczyna, na której przejście stanęło, albo ``None``, a ``_unread``, czy przejście
+        pominęło plik, którego nie dało się odczytać.
         """
 
+        self._unread = False
         for path in sorted(self._directory.glob("*.json")):
             if path.name in self._undeleted:
                 self._remove(path)
                 continue
             if path.name in self._rejected:
                 continue
-            queued = _queued(path)
+            try:
+                queued = _queued(path)
+            except OSError:  # coś trzyma plik otwarty (OneDrive, antywirus): następne przejście go odczyta
+                self._unread = True
+                queued = None
             if queued is None:
                 self._skip_unreadable(path)
                 continue

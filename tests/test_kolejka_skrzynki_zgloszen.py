@@ -536,6 +536,34 @@ def test_plik_kolejki_ktorego_nie_da_sie_odczytac_zostaje_z_jednym_wpisem_i_nie_
 
     assert queue.log().count(f"skrzynka-nieczytelny plik={broken}") == 1
     assert "nieoczekiwany-wyjatek" not in queue.log()
+    queue.passed()
+    assert queue.clock.wakes == 0
+
+
+def test_plik_kolejki_ktorego_chwilowo_nie_da_sie_odczytac_wychodzi_po_minucie_bez_kolejnej_wysylki(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = Queue(tmp_path, FakeReportBox())
+    read_text = Path.read_text
+    held = [True]
+
+    def held_once(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if path.parent == queue.directory and held:
+            held.clear()
+            raise PermissionError("plik otwarty w innym programie")
+        return read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", held_once)
+    queue.outbox.post(post(["treść\n"]))
+    queue.passed()
+    assert (queue.box.issues, len(queue.files())) == ([], 1)
+
+    queue.clock.advance(RETRY_S)
+
+    assert queue.box.wait_until(lambda box: len(box.issues) == 1)
+    assert wait_for(lambda: queue.files() == [])
+    queue.passed()
+    assert queue.clock.wakes == 0
 
 
 def test_wyslanej_wysylki_ktorej_nie_da_sie_usunac_skrzynka_nie_dostaje_drugi_raz(
