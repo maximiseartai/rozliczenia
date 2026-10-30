@@ -1,6 +1,6 @@
 ---
 name: przeglad
-description: Przegląd PR w tym repozytorium, wspólny dla autora i recenzenta - co jest porażką (Ważne, Drobne), jakie dowody, postać werdyktu i kolejne rundy. Użyj przed pushem, żeby świeży agent przejrzał Twój diff (tryb autora), i jako niezależny recenzent PR, zanim napiszesz i opublikujesz werdykt PASS albo FAIL (tryb recenzenta). Tryb podaje wywołujący.
+description: Przegląd PR w tym repozytorium, wspólny dla autora i recenzenta - co jest porażką (Ważne, Drobne), jakie dowody, postać werdyktu i kolejne rundy. Użyj jako niezależny recenzent PR, zanim napiszesz i opublikujesz werdykt PASS albo FAIL (tryb recenzenta), albo w trybie autora, gdy wywołujący go poda.
 ---
 
 # Przegląd PR
