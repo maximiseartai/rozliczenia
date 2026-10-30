@@ -27,6 +27,14 @@ Defekt, który zmiana PR wywołuje albo ujawnia, liczy się do werdyktu także w
 Istniejące wcześniej to tylko defekt, który powtarzasz na merge-base bez tej zmiany, i do werdyktu się nie liczy.
 Styl, nazwy i formatowanie zostawiasz ruffowi, mypy i lintom frontendu.
 
+## Poziom przeglądu
+
+Poziom podaje linia `POZIOM` z `tools/scal_pr.py <PR> --przeglad`, a bez GitHuba `.venv/bin/python tools/scal_pr.py --poziom <merge-base>` na HEAD PR; które ścieżki dają który poziom, mówi jego `--help`.
+
+- `szybki` (same testy i dokumenty): przeglądasz tylko diff i nie uruchamiasz własnych mutacji; Ważne dalej ma dowód z sekcji „Dowody”.
+- `standardowy`: przegląd według wszystkich sekcji tego skilla.
+- `gleboki` (zapis skoroszytu taty, narzędzie Wydań, workflow CI, hooki, `scal_pr.py`, serwer Centrum): jak standardowy, a pierwsza runda jest szeroka: każde Ważne nazywa klasę błędu (np. parser, który przepuszcza formę, której nie zna; brama zielona bez jednostki, której oczekuje) i wymienia wszystkie jej wystąpienia w diffie, żeby autor poprawił całą klasę w jednej rundzie.
+
 ## Dowody
 
 Każde znalezisko ma plik:linia i dowód: polecenie z wynikiem, repro albo mutację z `tools/mutacje.py` (`NIEWYKRYTA` albo `WYKRYTA`).
@@ -58,7 +66,7 @@ Ten przegląd nie zastępuje niezależnego przeglądu PR i nie blokuje pushu.
    Krok kończy się, gdy `szybko.py` przechodzi na HEAD, który chcesz wypchnąć.
 2. Zleć przegląd jednemu nowemu agentowi, który nie zna Twojej rozmowy.
    Podaj mu ten skill w trybie autora, katalog worktree, pełny SHA HEAD, merge-base z `origin/main` (`git merge-base HEAD origin/main`) i cel zmiany jednym zdaniem, bez własnej oceny diffu.
-   Recenzent przegląda diff od merge-base do HEAD według reguł wyżej i oddaje werdykt w postaci z sekcji „Postać werdyktu” w odpowiedzi, bez komentarza na GitHubie.
+   Recenzent przegląda diff od merge-base do HEAD według reguł wyżej, na poziomie z `tools/scal_pr.py --poziom <merge-base>`, i oddaje werdykt w postaci z sekcji „Postać werdyktu” w odpowiedzi, bez komentarza na GitHubie.
    Krok kończy się, gdy masz jego werdykt.
 3. Popraw każde Ważne, a Drobne popraw albo zapisz z powodem w opisie PR.
    Po poprawkach znów przejdź `tools/szybko.py`, a drugiej rundy przeglądu autora nie zlecasz.
@@ -72,9 +80,9 @@ Niezależny recenzent, który nie pisał kodu, przegląda HEAD PR i publikuje we
 Kto zleca przegląd, podaje numer PR i katalog biegu, w którym leży plik werdyktu (`~/.t3/notes/<bieg>/recenzje/<PR>/`), a bez biegu plik leży w `~/.t3/notes/recenzje/<PR>/`.
 
 1. Uruchom `.venv/bin/python tools/scal_pr.py <PR> --przeglad`.
-   Drukuje pełny SHA HEAD, merge-base z bazą, `git diff --stat`, zmienione pliki, wynik `tools/skille_dla_zmiany.py` dla HEAD PR i poprzednie werdykty z ich SHA i dwiema pierwszymi liniami.
-   Krok kończy się, gdy masz SHA HEAD i merge-base; poprzedni werdykt znaczy, że to kolejna runda (sekcja „Kolejne rundy”).
-2. Przejrzyj diff według sekcji „Co jest porażką” i „Dowody”, a skille z linii `SKILLE VERIFY` wykonaj według sekcji `What CI runs and what stays local` każdego z nich.
+   Drukuje pełny SHA HEAD, merge-base z bazą, `git diff --stat`, zmienione pliki, linię `POZIOM`, wynik `tools/skille_dla_zmiany.py` dla HEAD PR i poprzednie werdykty z ich SHA i dwiema pierwszymi liniami.
+   Krok kończy się, gdy masz SHA HEAD, merge-base i linię `POZIOM` (sekcja „Poziom przeglądu”); poprzedni werdykt znaczy, że to kolejna runda (sekcja „Kolejne rundy”).
+2. Przejrzyj diff według sekcji „Co jest porażką” i „Dowody” na poziomie z linii `POZIOM`, a skille z linii `SKILLE VERIFY` wykonaj według sekcji `What CI runs and what stays local` każdego z nich.
    Każde potwierdzone znalezisko z oznaczeniem, plik:linia i dowodem od razu dopisz do pliku `runda-<k>.md` w katalogu werdyktu, żeby przerwany przegląd zostawił znaleziska.
    Krok kończy się, gdy przejrzałeś cały diff, a każde znalezisko jest w pliku.
 3. Dopisz na górę pliku dwie linie z sekcji „Postać werdyktu”, a na koniec krótko, co sprawdzone i z jakim wynikiem.

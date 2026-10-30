@@ -887,7 +887,7 @@ def test_przeglad_podaje_merge_base_zmiane_skille_z_head_pr_i_poprzednie_werdykt
     assert answered.stdout.splitlines()[0] == f"PRZEGLĄD | #1 PR 1 | HEAD {head} | baza main {main} | merge-base {github.start}"
     assert f"ZMIANA | git diff --stat {github.start} {head}\n" in answered.stdout
     assert " 2 files changed, 2 insertions(+), 1 deletion(-)\n" in answered.stdout
-    assert "PLIKI | 2\nkod/inne.py\nskille.txt\n" in answered.stdout
+    assert "PLIKI | 2\nkod/inne.py\nskille.txt\nPOZIOM standardowy | kod/inne.py\n" in answered.stdout
     assert f"SKILLE | tools/skille_dla_zmiany.py {github.start} na HEAD PR\nverify-pr: kod/inne.py, skille.txt\nSKILLE VERIFY: verify-pr\n" in answered.stdout
     assert _lines(answered, "WERDYKT |") == [
         f"WERDYKT | {fail['createdAt']} recenzent | inny commit | WERDYKT: FAIL {reviewed} | Znaleziska: 1 (Ważne 1, Drobne 0)",
@@ -897,6 +897,117 @@ def test_przeglad_podaje_merge_base_zmiane_skille_z_head_pr_i_poprzednie_werdykt
     assert _last_line(answered) == f"PRZEGLĄD OK | #1 {head[:7]}"
     assert github.published() == []
     assert github.merges() == []
+
+
+def test_przeglad_pr_ktory_zmienia_hook_podaje_poziom_gleboki(tmp_path: Path) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM})
+    github.open_pull(1, {"docs/zasady.md": "Zasady.\n", "tools/hooks/czekanie.py": "CZEKAJ = 1\n"})
+
+    answered = github.run("1", "--przeglad")
+
+    assert answered.returncode == 0, answered.stdout + answered.stderr
+    assert _lines(answered, "POZIOM") == ["POZIOM gleboki | tools/hooks/czekanie.py"]
+
+
+# Poziomy przeglądu ze skilla ``przeglad``: głęboki zapis skoroszytu taty, narzędzie Wydań, workflow CI, hooki,
+# ``scal_pr.py`` i serwer Centrum; szybki same ``tests/``, ``docs/`` i ``*.md`` poza ``AGENTS.md`` i ``CODING_STANDARDS.md``.
+DEEP = [
+    "src/rozliczenia/workbook_save.py",
+    "src/rozliczenia/template_file.py",
+    "src/rozliczenia/template_copy.py",
+    "src/rozliczenia/row_look.py",
+    "src/rozliczenia/intermax_file.py",
+    "tools/wydanie.py",
+    ".github/workflows/ci.yml",
+    "tools/hooks/pre-push",
+    "tools/scal_pr.py",
+    "src/rozliczenia/centrum/app.py",
+    "src/rozliczenia/centrum/server.py",
+]
+
+
+def _repository_with_tool(tmp_path: Path, start: dict[str, str]) -> tuple[Path, str]:
+    """Repozytorium z ``tools/scal_pr.py`` i commitem ``start``: katalog i SHA tego commitu."""
+
+    repo = repository(tmp_path / "repo", {"README.md": "Repo.\n", **start})
+    for tool in ("scal_pr.py", "scalenia_pr.py"):
+        shutil.copy2(TOOLS / tool, repo / "tools" / tool)
+    return repo, commit(repo, "start")
+
+
+def _depth_since(repo: Path, base: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(repo / "tools" / "scal_pr.py"), "--poziom", base], cwd=repo, capture_output=True, text=True, encoding="utf-8", timeout=60, check=False
+    )
+
+
+def _depth(tmp_path: Path, files: dict[str, str | None], *, start: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """``scal_pr.py --poziom`` od commitu ``start`` po commicie, który dopisuje ``files`` (``None`` usuwa plik), bez GitHuba."""
+
+    repo, base = _repository_with_tool(tmp_path, start or {})
+    for name, text in files.items():
+        if text is None:
+            (repo / name).unlink()
+            continue
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        with (repo / name).open("a", encoding="utf-8") as written:
+            written.write(text)
+    if files:
+        commit(repo, "zmiana")
+    return _depth_since(repo, base)
+
+
+@pytest.mark.parametrize("deep", DEEP)
+def test_poziom_gleboki_gdy_zmiana_dotyka_sciezki_glebokiej_choc_reszta_to_dokumenty(tmp_path: Path, deep: str) -> None:
+    answered = _depth(tmp_path, {"docs/zasady.md": "Zasady.\n", deep: "# zmiana\n"})
+
+    assert answered.returncode == 0, answered.stdout + answered.stderr
+    assert answered.stdout == f"POZIOM gleboki | {deep}\n"
+
+
+@pytest.mark.parametrize(
+    ("files", "line"),
+    [
+        ({"tests/test_a.py": "A = 1\n", "tests/fixtures/b.py": "B = 1\n", "docs/agents/c.md": "C.\n", "README.md": "Inne.\n"}, "POZIOM szybki | same testy i dokumenty"),
+        ({".agents/skills/x/SKILL.md": "Skill.\n"}, "POZIOM szybki | same testy i dokumenty"),
+        ({"docs/wykres.svg": "<svg/>\n"}, "POZIOM szybki | same testy i dokumenty"),
+        ({"tests/test_a.py": "A = 1\n", "AGENTS.md": "Router.\n"}, "POZIOM standardowy | AGENTS.md"),
+        ({"CODING_STANDARDS.md": "Reguły.\n"}, "POZIOM standardowy | CODING_STANDARDS.md"),
+        ({"docs/a.md": "A.\n", "tools/szybko.py": "S = 1\n", "tools/plan_ci.py": "P = 1\n"}, "POZIOM standardowy | tools/plan_ci.py"),
+        ({}, "POZIOM standardowy | brak zmienionych plików"),
+    ],
+    ids=["testy-i-dokumenty", "plik-md-gleboko", "dokument-nie-md", "agents-md", "coding-standards", "narzedzie", "bez-zmian"],
+)
+def test_poziom_szybki_tylko_gdy_kazdy_plik_to_test_albo_dokument_poza_regulami_repo(tmp_path: Path, files: dict[str, str | None], line: str) -> None:
+    answered = _depth(tmp_path, files)
+
+    assert answered.returncode == 0, answered.stdout + answered.stderr
+    assert answered.stdout == f"{line}\n"
+
+
+def test_poziom_gleboki_takze_gdy_zmiana_przenosi_sciezke_gleboka_do_dokumentow(tmp_path: Path) -> None:
+    workflow = "name: CI\non: [push]\njobs: {}\n"
+    answered = _depth(tmp_path, {".github/workflows/ci.yml": None, "docs/ci.yml": workflow}, start={".github/workflows/ci.yml": workflow})
+
+    assert answered.returncode == 0, answered.stdout + answered.stderr
+    assert answered.stdout == "POZIOM gleboki | .github/workflows/ci.yml\n"
+
+
+def test_poziom_od_nieznanego_commitu_konczy_sie_bledem_narzedzia(tmp_path: Path) -> None:
+    repo, _ = _repository_with_tool(tmp_path, {})
+
+    answered = _depth_since(repo, "nie-ma-takiego")
+
+    assert answered.returncode == 1, answered.stdout + answered.stderr
+    assert answered.stdout.startswith("POZIOM FAIL | git diff --name-only --no-renames nie-ma-takiego HEAD: ")
+
+
+def test_bez_numeru_pr_tylko_poziom(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exited:
+        scal_pr.main(["--bez-merge"])
+
+    assert exited.value.code == 2
+    assert "podaj numer PR" in capsys.readouterr().err
 
 
 def test_przeglad_po_pass_dla_head_mowi_ze_werdykt_dotyczy_tego_head_a_rundy_z_fail_licza_tylko_fail(tmp_path: Path) -> None:

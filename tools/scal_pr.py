@@ -85,7 +85,12 @@ kontekst przeglądu: pełny SHA HEAD PR, bazę i merge-base z nią, ``git diff -
 wynik ``tools/skille_dla_zmiany.py`` z HEAD PR liczony od merge-base (w kopii commitu HEAD, więc ``pilnuje:`` skilli
 jest z PR) i poprzednie werdykty PR w kolejności utworzenia, każdy z datą, autorem, dwiema pierwszymi liniami i tym,
 czy dotyczy HEAD. Gdy ostatni werdykt jest dla innego commitu, linia ``RUNDA`` podaje polecenie diffu od niego do
-HEAD. Kończy się linią ``PRZEGLĄD OK | #N <sha>``.
+HEAD. Linia ``POZIOM szybki|standardowy|gleboki | <powód>`` podaje poziom przeglądu ze zmienionych plików: głęboki,
+gdy któryś pasuje do ``DEEP_REVIEW`` (zapis skoroszytu taty, narzędzie Wydań, workflow CI, hooki, ten plik, serwer
+Centrum), a powód to pierwszy taki plik; szybki, gdy każdy pasuje do ``QUICK_REVIEW`` (``tests/``, ``docs/``, pliki
+``.md``) i żaden nie jest w ``QUICK_REVIEW_EXCEPT``; inaczej standardowy z pierwszym plikiem spoza szybkich. Kończy się
+linią ``PRZEGLĄD OK | #N <sha>``. ``--poziom <merge-base>`` drukuje bez GitHuba samą linię ``POZIOM`` dla zmiany od
+merge-base do HEAD checkoutu i nie potrzebuje numeru PR.
 
 ``--werdykt <plik>`` publikuje plik jako komentarz PR (``gh pr comment --body-file``), gdy pierwsza niepusta linia
 to ``WERDYKT: PASS <SHA>`` albo ``WERDYKT: FAIL <SHA>`` z pełnym SHA bieżącego HEAD PR, druga to ``Znaleziska: N
@@ -97,13 +102,16 @@ albo FAIL> | <adres komentarza>``.
     .venv/bin/python tools/scal_pr.py 336               # sprawdza i scala
     .venv/bin/python tools/scal_pr.py 336 --bez-merge   # tylko sprawdza
     .venv/bin/python tools/scal_pr.py 336 --przeglad    # kontekst dla recenzenta
+    .venv/bin/python tools/scal_pr.py --poziom $(git merge-base HEAD origin/main)
     .venv/bin/python tools/scal_pr.py 336 --werdykt ~/.t3/notes/bieg/recenzje/336/runda-1.md
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from html.parser import HTMLParser
 import json
 from pathlib import Path
@@ -122,6 +130,22 @@ FINDINGS_LINE = re.compile(r"Znaleziska: (\d+) \(Ważne (\d+), Drobne (\d+)\)")
 MAX_MINOR = 3
 SKILLS_FOR_CHANGE = Path("tools") / "skille_dla_zmiany.py"
 SKILLS_TIMEOUT_S = 300
+# Poziom przeglądu (skill ``przeglad``) ze zmienionych plików; ``*`` w ``fnmatchcase`` obejmuje też ``/``.
+DEEP_REVIEW = (
+    "src/rozliczenia/workbook_save.py",
+    "src/rozliczenia/template_file.py",
+    "src/rozliczenia/template_copy.py",
+    "src/rozliczenia/row_look.py",
+    "src/rozliczenia/intermax_file.py",
+    "tools/wydanie.py",
+    ".github/workflows/*",
+    "tools/hooks/*",
+    "tools/scal_pr.py",
+    "src/rozliczenia/centrum/app.py",
+    "src/rozliczenia/centrum/server.py",
+)
+QUICK_REVIEW = ("tests/*", "docs/*", "*.md")
+QUICK_REVIEW_EXCEPT = frozenset({"AGENTS.md", "CODING_STANDARDS.md"})
 TRUSTED = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 CLEANUP = ROOT / "tools" / "sprzatanie.py"
 TEMPLATE = ROOT / ".agents" / "skills" / "pr" / "SKILL.md"
@@ -491,15 +515,36 @@ def _verdict_history(pull: Pull) -> list[str]:
     return [*shown, f"RUNDA | {rounds}; zmiana od niego: git diff {last[1]} {pull.head}"]
 
 
+def _review_depth(files: Sequence[str]) -> str:
+    """Linia ``POZIOM`` dla zmienionych plików ``files`` z plikiem, który rozstrzyga poziom."""
+
+    if deep := next((file for file in files if any(fnmatchcase(file, glob) for glob in DEEP_REVIEW)), None):
+        return f"POZIOM gleboki | {deep}"
+    outside = [file for file in files if file in QUICK_REVIEW_EXCEPT or not any(fnmatchcase(file, glob) for glob in QUICK_REVIEW)]
+    if files and not outside:
+        return "POZIOM szybki | same testy i dokumenty"
+    return f"POZIOM standardowy | {outside[0] if outside else 'brak zmienionych plików'}"
+
+
+def _changed_files(fork: str, head: str) -> list[str]:
+    return _git("diff", "--name-only", "--no-renames", fork, head).splitlines()
+
+
+def _print_depth(fork: str) -> int:
+    print(_review_depth(_changed_files(fork, "HEAD")))
+    return 0
+
+
 def _review_context(number: int) -> int:
     pull = _pull(number)
     base = scalenia_pr.fetch(pull.base, [scalenia_pr.PullRequest(pull.number, pull.title, pull.head)])
     fork = _git("merge-base", base, pull.head).strip()
-    files = _git("diff", "--name-only", "--no-renames", fork, pull.head).splitlines()
+    files = _changed_files(fork, pull.head)
     print(f"PRZEGLĄD | #{pull.number} {pull.title} | HEAD {pull.head} | baza {pull.base} {base} | merge-base {fork}")
     print(f"ZMIANA | git diff --stat {fork} {pull.head}")
     print(_git("diff", "--stat", fork, pull.head).rstrip())
     print(f"PLIKI | {len(files)}", *files, sep="\n")
+    print(_review_depth(files))
     print(f"SKILLE | {SKILLS_FOR_CHANGE.as_posix()} {fork} na HEAD PR", *_skills_for_change(pull.head, fork), sep="\n")
     print(*_verdict_history(pull), sep="\n")
     print(f"PRZEGLĄD OK | #{pull.number} {pull.head[:7]}")
@@ -563,14 +608,19 @@ def _merge(number: int, *, merge: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("numer", type=int, help="Numer PR.")
+    parser.add_argument("numer", type=int, nargs="?", help="Numer PR; bez niego tylko --poziom.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--bez-merge", action="store_true", help="Sprawdź gotowość, ale nie scalaj.")
     mode.add_argument("--przeglad", action="store_true", help="Wydrukuj recenzentowi kontekst przeglądu PR.")
     mode.add_argument("--werdykt", type=Path, metavar="PLIK", help="Sprawdź plik werdyktu i opublikuj go jako komentarz PR.")
+    mode.add_argument("--poziom", metavar="MERGE_BASE", help="Wydrukuj poziom przeglądu zmiany od MERGE_BASE do HEAD, bez GitHuba.")
     args = parser.parse_args(argv)
-    label = "PRZEGLĄD" if args.przeglad else "WERDYKT" if args.werdykt else "SCAL"
+    if args.numer is None and args.poziom is None:
+        parser.error("podaj numer PR")
+    label = "POZIOM" if args.poziom else "PRZEGLĄD" if args.przeglad else "WERDYKT" if args.werdykt else "SCAL"
     try:
+        if args.poziom:
+            return _print_depth(args.poziom)
         if args.przeglad:
             return _review_context(args.numer)
         if args.werdykt:
