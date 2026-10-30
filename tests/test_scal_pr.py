@@ -8,6 +8,7 @@ wywołania ``gh pr merge`` zamiast scalać.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -50,7 +51,48 @@ def git(*command):
 REPO = "maximiseartai/MAXIMISEART-Dad"
 
 
-if arguments[:2] == ["pr", "view"]:
+def merge(pull):
+    base = git("rev-parse", "refs/heads/main")
+    tree = git("merge-tree", "--write-tree", base, pull["headRefOid"])
+    merge = git("commit-tree", tree, "-p", base, "-p", pull["headRefOid"], "-m", "Merge")
+    git("update-ref", "refs/heads/main", merge)
+    pull.update(state="MERGED", mergeCommit=None if pull.get("poMergeu") else {"oid": merge})
+
+
+def log(name, entry):
+    with (here / name).open("a") as file:
+        file.write(json.dumps(entry) + "\\n")
+
+
+if arguments[:2] == ["api", "graphql"]:
+    fields = dict(argument.split("=", 1) for argument in arguments[3::2])
+    if "enqueuePullRequest" in fields["query"]:
+        pull = next(pull for pull in pulls.values() if f"PR_{pull['number']}" == fields["id"])
+        if fields["head"] != pull["headRefOid"]:
+            sys.exit("gh: Expected head commit to match")
+        pull["kolejka"]["wpis"] = {"state": "AWAITING_CHECKS", "position": 1}
+        log("enqueues.jsonl", fields["head"])
+    else:
+        log("queue_queries.jsonl", fields["number"])
+        pull = pulls[fields["number"]]
+        queue = pull.get("kolejka") or {"wlaczona": False, "wpis": None, "usuniecia": 0}
+        if queue["wpis"] and queue.get("potem") == "scala":
+            merge(pull)
+            queue["wpis"] = None
+        elif queue["wpis"] and queue.get("potem") == "usuwa":
+            queue.update(wpis=None, usuniecia=queue["usuniecia"] + 1)
+        removed = [{"reason": "Required status check failed"}] if queue["usuniecia"] else []
+        answer = {
+            "id": f"PR_{pull['number']}",
+            "state": pull["state"],
+            "isMergeQueueEnabled": queue["wlaczona"],
+            "mergeCommit": pull["mergeCommit"],
+            "mergeQueueEntry": queue["wpis"],
+            "timelineItems": {"filteredCount": queue["usuniecia"], "nodes": removed},
+        }
+        print(json.dumps({"data": {"repository": {"pullRequest": answer}}}))
+    (here / "pulls.json").write_text(json.dumps(pulls))
+elif arguments[:2] == ["pr", "view"]:
     pull = pulls[arguments[2]]
     if pull.get("poMergeu") == "błąd" and pull["state"] == "MERGED":
         sys.exit("gh: HTTP 502")
@@ -59,18 +101,12 @@ elif arguments[:2] == ["pr", "merge"]:
     pull = pulls[arguments[2]]
     if arguments[arguments.index("--match-head-commit") + 1] != pull["headRefOid"]:
         sys.exit("HEAD PR zmienił się")
-    base = git("rev-parse", "refs/heads/main")
-    tree = git("merge-tree", "--write-tree", base, pull["headRefOid"])
-    merge = git("commit-tree", tree, "-p", base, "-p", pull["headRefOid"], "-m", "Merge")
-    git("update-ref", "refs/heads/main", merge)
-    pull.update(state="MERGED", mergeCommit=None if pull.get("poMergeu") else {"oid": merge})
+    merge(pull)
     (here / "pulls.json").write_text(json.dumps(pulls))
-    with (here / "merges.jsonl").open("a") as log:
-        log.write(json.dumps(arguments) + "\\n")
+    log("merges.jsonl", arguments)
 elif arguments == ["api", "markdown", "--input", "-"]:
     request = json.loads(sys.stdin.read())
-    with (here / "renders.jsonl").open("a") as log:
-        log.write(json.dumps(request) + "\\n")
+    log("renders.jsonl", request)
     if request.keys() != {"text", "mode", "context"} or request["mode"] != "gfm" or request["context"].casefold() != REPO.casefold():
         sys.exit(f"atrapa gh nie zna renderowania: {request}")
     html = markdown.get(request["text"], "gh: atrapa gh nie zna opisu")
@@ -88,16 +124,14 @@ elif arguments[0] == "api" and arguments[1].startswith(f"repos/{REPO}/issues/"):
     else:
         sys.exit("gh: Not Found (HTTP 404)")
 elif arguments[:2] == ["repo", "view"]:
-    with (here / "repo_views.jsonl").open("a") as log:
-        log.write(json.dumps(arguments) + "\\n")
+    log("repo_views.jsonl", arguments)
     if repo_view.startswith("gh: "):
         sys.exit(repo_view)
     print(repo_view)
 elif arguments[:2] == ["issue", "close"]:
     issues[arguments[2]] = json.dumps({"state": "closed"})
     (here / "issues.json").write_text(json.dumps(issues))
-    with (here / "closed.jsonl").open("a") as log:
-        log.write(json.dumps(arguments) + "\\n")
+    log("closed.jsonl", arguments)
 else:
     sys.exit(f"atrapa gh nie zna: {arguments}")
 """
@@ -230,6 +264,21 @@ class FakeGitHub:
 
     def merges(self) -> list[list[str]]:
         return self._log("merges.jsonl")
+
+    def queue(self, number: int, then: str) -> None:
+        """Baza PR ma kolejkę scaleń, która po wstawieniu PR go scala (``scala``), usuwa (``usuwa``) albo trzyma (``czeka``)."""
+
+        self.update(number, kolejka={"wlaczona": True, "wpis": None, "usuniecia": 0, "potem": then})
+
+    def enqueues(self) -> list[str]:
+        """``expectedHeadOid`` każdego wstawienia PR do kolejki scaleń."""
+
+        return [str(head) for head in self._log("enqueues.jsonl")]
+
+    def queue_queries(self) -> int:
+        """Ile razy narzędzie pytało GitHuba o stan kolejki scaleń."""
+
+        return len(self._log("queue_queries.jsonl"))
 
     def closed(self) -> list[list[str]]:
         return self._log("closed.jsonl")
@@ -413,6 +462,92 @@ def test_sprzeciw_zaufanego_konta_dla_head_po_pass_blokuje_merge(tmp_path: Path,
     assert answered.returncode == 1, answered.stdout + answered.stderr
     assert _last_line(answered) == f"SCAL ODMOWA | #1 {head[:7]} | {OBJECTION.format(short=head[:7], head=head)}"
     assert github.merges() == []
+
+
+def _merge_into(github: FakeGitHub, first: str, second: str, files: dict[str, str] | None = None) -> str:
+    """Commit scalenia ``second`` do ``first`` z konfliktami rozwiązanymi na korzyść ``first`` i ``files`` dopisanymi przed commitem."""
+
+    git(github.checkout, "checkout", "--quiet", "--detach", first)
+    git(github.checkout, "merge", "--quiet", "--no-ff", "--no-commit", "-X", "ours", second)
+    for name, text in (files or {}).items():
+        (github.checkout / name).write_text(text, encoding="utf-8")
+    made = commit(github.checkout, f"Merge {second[:7]}")
+    git(github.checkout, "checkout", "--quiet", "main")
+    return made
+
+
+def _clean_merge(github: FakeGitHub, reviewed: str) -> str:
+    return _merge_into(github, reviewed, github.push_main({"kod/nowe.py": "NOWE: int = 1\n"}))
+
+
+def _two_clean_merges(github: FakeGitHub, reviewed: str) -> str:
+    first = _clean_merge(github, reviewed)
+    return _merge_into(github, first, github.push_main({"kod/nowe.py": "NOWE: int = 2\n"}))
+
+
+def _merge_with_own_change(github: FakeGitHub, reviewed: str) -> str:
+    return _merge_into(github, reviewed, github.push_main({"kod/nowe.py": "NOWE: int = 1\n"}), {"kod/inne.py": "INNE: int = 3\n"})
+
+
+def _conflict_resolved_by_hand(github: FakeGitHub, reviewed: str) -> str:
+    return _merge_into(github, reviewed, github.push_main({"kod/inne.py": "INNE: int = 9\n"}))
+
+
+def _merge_of_other_branch(github: FakeGitHub, reviewed: str) -> str:
+    return _merge_into(github, reviewed, github.commit_on(github.start, {"kod/obok.py": "OBOK: int = 1\n"}, "gałąź obok"))
+
+
+def _rebase_on_main(github: FakeGitHub, reviewed: str) -> str:
+    return github.commit_on(github.push_main({"kod/nowe.py": "NOWE: int = 1\n"}), {"kod/inne.py": "INNE: int = 1\n"}, "PR 1 po rebase")
+
+
+def _content_change(github: FakeGitHub, reviewed: str) -> str:
+    return github.commit_on(reviewed, {"kod/inne.py": "INNE: int = 2\n"}, "PR 1 po poprawce")
+
+
+@pytest.mark.parametrize(
+    ("make_head", "valid"),
+    [
+        (_clean_merge, True),
+        (_two_clean_merges, True),
+        (_merge_with_own_change, False),
+        (_conflict_resolved_by_hand, False),
+        (_merge_of_other_branch, False),
+        (_rebase_on_main, False),
+        (_content_change, False),
+    ],
+    ids=["czyste-scalenie-main", "dwa-czyste-scalenia-main", "scalenie-z-wlasna-zmiana", "konflikt-rozwiazany-recznie", "scalenie-innej-galezi", "rebase-na-main", "zmiana-tresci"],
+)
+def test_werdykt_przechodzi_na_head_tylko_po_samych_czystych_scaleniach_main(
+    tmp_path: Path, make_head: Callable[[FakeGitHub, str], str], valid: bool
+) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM})
+    reviewed = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
+    github.comment(1, f"WERDYKT: PASS {reviewed}")
+    head = make_head(github, reviewed)
+    git(github.checkout, "push", "--quiet", "--force", "origin", f"{head}:refs/pull/1/head")
+    github.update(1, headRefOid=head)
+
+    answered = github.run("1", "--bez-merge")
+
+    expected = f"SCAL OK | #1 {head[:7]} | gotowy do merge'a z main" if valid else f"SCAL ODMOWA | #1 {head[:7]} | {NO_PASS.format(head=head)}"
+    assert _last_line(answered).startswith(expected), answered.stdout + answered.stderr
+
+
+@pytest.mark.parametrize("fail_on", ["head", "reviewed"], ids=["fail-dla-scalenia-po-pass-recenzowanego", "fail-recenzowanego-po-pass-scalenia"])
+def test_najnowszy_werdykt_rozstrzyga_takze_miedzy_recenzowanym_commitem_a_jego_czystym_scaleniem(tmp_path: Path, fail_on: str) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM})
+    reviewed = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
+    head = _clean_merge(github, reviewed)
+    git(github.checkout, "push", "--quiet", "--force", "origin", f"{head}:refs/pull/1/head")
+    github.update(1, headRefOid=head)
+    github.comment(1, f"WERDYKT: PASS {head if fail_on == 'reviewed' else reviewed}")
+    github.comment(1, f"WERDYKT: FAIL {reviewed if fail_on == 'reviewed' else head}")
+
+    answered = github.run("1", "--bez-merge")
+
+    assert answered.returncode == 1, answered.stdout + answered.stderr
+    assert _last_line(answered) == f"SCAL ODMOWA | #1 {head[:7]} | {OBJECTION.format(short=head[:7], head=head)}"
 
 
 @pytest.mark.parametrize(
@@ -614,6 +749,89 @@ def test_baza_przesunieta_z_innego_klonu_przed_sprawdzeniem_jest_baza_scalenia(t
     assert answered.returncode == 0, answered.stdout + answered.stderr
     assert f"| scalony do main jako {git(github.origin, 'rev-parse', 'refs/heads/main')[:7]} (baza {moved[:7]}) |" in _last_line(answered)
     assert len(github.merges()) == 1
+
+
+def test_baza_z_kolejka_scalen_dostaje_gotowy_pr_w_kolejce_z_jego_head_a_po_scaleniu_przez_nia_biegnie_sprzatanie(tmp_path: Path) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM, "tools/sprzatanie.py": CLEANUP})
+    head = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
+    github.queue(1, "scala")
+    github.comment(1, f"WERDYKT: PASS {head}")
+
+    checked = github.run("1", "--bez-merge")
+    enqueued_before_merge = github.enqueues()
+    merged = github.run("1", "--czekaj", "5")
+
+    assert _last_line(checked).startswith(f"SCAL OK | #1 {head[:7]} | gotowy do merge'a z main {github.start[:7]}")
+    assert enqueued_before_merge == []
+    assert github.queue_queries() == 3, "po scaleniu przez kolejkę narzędzie przestaje o nią pytać"
+    merge_commit = git(github.origin, "rev-parse", "refs/heads/main")
+    assert merged.returncode == 0, merged.stdout + merged.stderr
+    assert _last_line(merged) == (
+        f"SCAL OK | #1 {head[:7]} | scalony do main przez kolejkę jako {merge_commit[:7]} (baza {github.start[:7]})"
+        " | sprzątanie: SPRZĄTANIE OK | 0 usuniętych"
+    )
+    assert github.enqueues() == [head]
+    assert github.merges() == []
+
+
+def test_kolejka_scalen_nie_odmawia_przy_bazie_przesunietej_w_trakcie_sprawdzania_bo_sama_sprawdza_scalenie(tmp_path: Path) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM})
+    moved = github.commit_on(github.start, {"kod/nowe.py": "NOWE: int = 1\n"}, "main w trakcie")
+    pushes_main = (
+        "import subprocess\n\n"
+        f"subprocess.run(['git', '-C', {str(github.checkout)!r}, 'push', '--quiet', 'origin', '{moved}:refs/heads/main'], check=True)\n"
+        "print('CI LOKALNIE OK')\n"
+    )
+    head = github.open_pull(1, {"tools/ci_lokalnie.py": pushes_main})
+    github.queue(1, "scala")
+    github.comment(1, f"WERDYKT: PASS {head}")
+
+    answered = github.run("1")
+
+    assert answered.returncode == 0, answered.stdout + answered.stderr
+    assert github.enqueues() == [head]
+
+
+def test_pr_usuniety_z_kolejki_scalen_jest_odmowa_z_powodem_od_githuba(tmp_path: Path) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM})
+    head = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
+    github.queue(1, "usuwa")
+    github.comment(1, f"WERDYKT: PASS {head}")
+
+    answered = github.run("1", "--czekaj", "5")
+
+    assert answered.returncode == 1, answered.stdout + answered.stderr
+    assert _last_line(answered) == f"SCAL ODMOWA | #1 {head[:7]} | kolejka scaleń usunęła PR: Required status check failed"
+    assert git(github.origin, "rev-parse", "refs/heads/main") == github.start
+    assert github.queue_queries() == 2, "po usunięciu z kolejki narzędzie przestaje o nią pytać"
+
+
+def test_pr_czekajacy_w_kolejce_po_czasie_zostaje_w_niej_a_ponowne_uruchomienie_konczy_po_scaleniu_bez_sprawdzania_od_nowa(
+    tmp_path: Path,
+) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM, "tools/sprzatanie.py": CLEANUP})
+    head = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
+    github.queue(1, "czeka")
+    github.comment(1, f"WERDYKT: PASS {head}")
+
+    waiting = github.run("1", "--czekaj", "0")
+    checked_in_queue = github.run("1", "--bez-merge", "--czekaj", "0")
+    pulls = json.loads((github.bin / "pulls.json").read_text(encoding="utf-8"))
+    pulls["1"].update(comments=[], statusCheckRollup=[_check_run("COMPLETED", "FAILURE")])
+    pulls["1"]["kolejka"]["potem"] = "scala"
+    (github.bin / "pulls.json").write_text(json.dumps(pulls), encoding="utf-8")
+    finished = github.run("1", "--czekaj", "0")
+
+    assert waiting.returncode == scal_pr.IN_QUEUE, waiting.stdout + waiting.stderr
+    assert _last_line(waiting) == (
+        f"SCAL KOLEJKA | #1 {head[:7]} | w kolejce do main: AWAITING_CHECKS, pozycja 1 po 0 s czekania, "
+        "uruchom ponownie tools/scal_pr.py 1, żeby czekać dalej"
+    )
+    assert _last_line(checked_in_queue).startswith(f"SCAL OK | #1 {head[:7]} | gotowy do merge'a z main")
+    merge_commit = git(github.origin, "rev-parse", "refs/heads/main")
+    assert finished.returncode == 0, finished.stdout + finished.stderr
+    assert _last_line(finished) == f"SCAL OK | #1 {head[:7]} | scalony do main przez kolejkę jako {merge_commit[:7]} | sprzątanie: SPRZĄTANIE OK | 0 usuniętych"
+    assert github.enqueues() == [head]
 
 
 def test_po_merge_zamyka_otwarte_issues_z_naprawia_z_komentarzem_a_bez_merge_tylko_je_podaje(tmp_path: Path) -> None:

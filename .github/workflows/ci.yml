@@ -9,13 +9,19 @@ on:
       - opened
       - reopened
       - synchronize
+  # The merge queue checks each pull request merged with main and the entries before it, so the required check runs on
+  # that merge too, as the gate of a pull request: HEAD^1 of the merge group commit is the tip it merges into.
+  merge_group:
+    types:
+      - checks_requested
 
 permissions:
   contents: read
 
 concurrency:
   # A new push to a pull request cancels the run of its older commit. On main the running run finishes, so every
-  # Wydanie candidate gets a full verdict, and a newer push replaces only the run still waiting (ADR 0020).
+  # Wydanie candidate gets a full verdict, and a newer push replaces only the run still waiting (ADR 0020). Each merge
+  # group has its own ref, so its run is never cancelled; the queue itself drops a group it no longer needs.
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -142,14 +148,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # On a pull request HEAD is the merge commit and HEAD^1 the base it merges into.
+          # On a pull request and in a merge group HEAD is the merge commit and HEAD^1 the base it merges into.
           fetch-depth: 2
 
       - name: Plan the units of work from the times of the last main runs
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 tools/plan_ci.py plan --zdarzenie "${{ github.event_name }}" --baza HEAD^1 --czasy .ci-plan/czasy --wyjscie .ci-plan/plan.json
+        run: python3 tools/plan_ci.py plan --zdarzenie "${{ github.event_name == 'merge_group' && 'pull_request' || github.event_name }}" --baza HEAD^1 --czasy .ci-plan/czasy --wyjscie .ci-plan/plan.json
 
       - uses: actions/upload-artifact@v7
         with:
