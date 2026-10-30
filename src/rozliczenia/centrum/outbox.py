@@ -29,13 +29,14 @@ from __future__ import annotations
 
 import itertools
 import json
+import sys
 import threading
-from collections.abc import Callable, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final, Literal, assert_never, get_args
+from typing import Any, BinaryIO, Final, Literal, assert_never, get_args
 
 from rozliczenia.centrum.atomic_file import replace_atomically
 from rozliczenia.centrum.clock import Clock
@@ -72,27 +73,63 @@ DELIVERY_WAIT_S: Final = 5.0
 Frame = Callable[[int, int, str], str]
 """Komentarz części ``k`` z ``n`` z jej tekstu."""
 
-# Foldery kolejki z trwającym przejściem w tym procesie i czy inna kolejka tego folderu prosi o następne. Dwie
-# kolejki jednego folderu (restart Centrum w procesie) nie wysyłają naraz: obie nie znalazłyby issue okresu, którego
-# druga jeszcze nie założyła, i założyłyby je dwa razy. Między procesami pilnuje tego port Centrum (``launcher``).
-_PASSES_LOCK: Final = threading.Lock()
-_PASSES: Final[dict[Path, bool]] = {}
+# Plik w folderze kolejki, którego blokadę trzyma trwające przejście. Dwie kolejki jednego folderu nie wysyłają naraz:
+# obie nie znalazłyby issue okresu, którego druga jeszcze nie założyła, i założyłyby je dwa razy. Port Centrum tego
+# nie wyklucza: uvicorn zwalnia go, zanim stary proces skończy pracę (``server._GRACEFUL_SHUTDOWN_S``), a jego wątek
+# kolejki dalej wysyła, gdy nowe Centrum już startuje.
+PASS_LOCK_FILE: Final = "przejscie.lock"
 
 
-def _claimed(directory: Path) -> bool:
-    """Czy to przejście może wysyłać z ``directory``; inaczej prosi trwające przejście o następne."""
+@contextmanager
+def _pass_lock(directory: Path) -> Iterator[bool]:
+    """Blokada przejścia na folderze kolejki, wspólna dla kolejek wszystkich procesów: ``False``, gdy trwa inne.
 
-    with _PASSES_LOCK:
-        alone = directory not in _PASSES
-        _PASSES[directory] = not alone
-        return alone
+    Blokadę trzyma otwarty plik, więc proces, który zginie w trakcie przejścia, oddaje ją razem z nim.
+    """
+
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / PASS_LOCK_FILE).open("ab") as handle:
+        if not _locked(handle):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            _unlock(handle)
 
 
-def _released(directory: Path) -> bool:
-    """Kończy przejście z ``directory``; ``True``, gdy w jego trakcie inna kolejka tego folderu prosiła o następne."""
+def _locked(handle: BinaryIO) -> bool:
+    """Bierze blokadę pliku bez czekania; ``False``, gdy ma ją inny uchwyt, także w tym samym procesie."""
 
-    with _PASSES_LOCK:
-        return _PASSES.pop(directory)
+    handle.seek(0)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(handle: BinaryIO) -> None:
+    """Zwalnia blokadę przed zamknięciem pliku: Windows zwalnia ją przy zamknięciu dopiero po pewnym czasie."""
+
+    handle.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 Closed = Literal["new_issue", "reuse"]
 _LABELS: Final = frozenset(get_args(Label))
 _CLOSED: Final = frozenset(get_args(Closed))
@@ -527,19 +564,20 @@ def _waiting(outcome: Failure) -> tuple[WaitingCause, Literal["stop", "next"]]:
 class Outbox:
     """Pliki kolejki w ``directory`` i jedyny wątek, który je wysyła, także sam po porażce skrzynki.
 
-    Każdy plik ma jednego autora (``post``, nowa nazwa) i jednego czytelnika, który go oznacza i usuwa (wątek
-    ``skrzynka-kolejka``), więc pliki nie potrzebują blokady. Blokada chroni tylko to, czy wątek już biegnie, i
-    adresy dostarczonych wysyłek; zbiory nazw plików i plik ``addresses`` zna tylko ten jeden wątek.
+    Każdy plik ma jednego autora (``post``, nowa nazwa) i naraz jednego czytelnika, który go oznacza i usuwa (wątek
+    ``skrzynka-kolejka`` z blokadą przejścia), więc pliki nie potrzebują własnej blokady. ``self._lock`` chroni tylko
+    to, czy wątek już biegnie, i adresy dostarczonych wysyłek; zbiory nazw plików i plik ``addresses`` zna tylko ten
+    jeden wątek.
     ``on_delivered`` dostaje każdą wysyłkę przyjętą przez skrzynkę i numer jej issue, w wątku wysyłki, zanim plik
     dostanie znacznik. ``on_rejected`` dostaje każdą wysyłkę, której treść skrzynka odrzuciła, w wątku wysyłki, zanim
     przejście pójdzie dalej. ``prepare`` dostaje wysyłkę z pliku tuż przed wysłaniem i zwraca tę, która pójdzie, albo
     ``None``: wysyłka czeka na inną i zostaje w kolejce do następnego przejścia.
 
-    Dwie kolejki jednego folderu w tym procesie nie wysyłają naraz (``_claimed``): kolejka, która zastanie przejście
-    drugiej, nie wysyła nic, a druga po swoim przejściu robi następne.
+    Dwie kolejki jednego folderu, także w starym i nowym procesie Centrum przy restarcie, nie wysyłają naraz
+    (``_pass_lock``): kolejka, która zastanie przejście drugiej, nie wysyła nic.
 
-    Przejście, które stanęło na przyczynie dla całej kolejki, nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba
-    że już jest nastawione; budzenie rusza wysyłkę w tle. Odrzucona treść i wysyłka czekająca w ``prepare`` budzenia
+    Przejście, które stanęło na przyczynie dla całej kolejki albo zastało przejście innej kolejki, nastawia jedno
+    budzenie ``clock`` za ``RETRY_S``, chyba że już jest nastawione; budzenie rusza wysyłkę w tle. Odrzucona treść i wysyłka czekająca w ``prepare`` budzenia
     nie nastawiają: ponowienie im nie pomoże. Linia „skrzynka-czeka” trafia do dziennika tylko przy zmianie przyczyny
     (zeruje ją każde dostarczenie i przejście do końca), bo budzenie co minutę zapełniłoby ostatnie wpisy, które niesie
     Diagnoza.
@@ -583,8 +621,11 @@ class Outbox:
 
         Woła go ``lifespan`` przed przyjęciem pierwszego zapytania HTTP. Wysyłkę tworzy tylko zapytanie HTTP
         (Uruchomienie albo „Wyślij” Uwagi taty), a wątek wysyłki rusza dopiero tutaj, więc żaden ``*.tmp`` nie ma
-        teraz autora: każdy został po zapisie przerwanym w poprzedniej pracy Centrum (np. utrata zasilania). Plik
-        ``.json`` obok niego, jeśli jest, ma pełną treść sprzed tego zapisu. Start nie czeka na skrzynkę: pyta ją tylko wątek w tle.
+        autora w tej pracy Centrum: zwykle został po zapisie przerwanym w poprzedniej (np. utrata zasilania). Plik
+        ``.json`` obok niego, jeśli jest, ma pełną treść sprzed tego zapisu. Autora ma tylko w starym procesie
+        Centrum, który zwolnił już port, a jeszcze kończy pracę (``server._GRACEFUL_SHUTDOWN_S``): jego ``post``
+        zwraca wtedy ``False`` (wysyłka przepadła), a znacznik dostarczenia jego przejścia nie trafia do pliku, który
+        ``_remove`` i tak zaraz usuwa. Start nie czeka na skrzynkę: pyta ją tylko wątek w tle.
         """
 
         with suppress(OSError):
@@ -655,20 +696,18 @@ class Outbox:
 
     def _drain(self) -> None:
         while True:
+            busy = False
             try:
-                if _claimed(self._directory):
-                    try:
+                with _pass_lock(self._directory) as alone:
+                    busy = not alone
+                    if alone:
                         self._send_all()
-                    finally:
-                        if _released(self._directory):
-                            with self._lock:
-                                self._again = True
             except Exception as failure:
                 self._log.unexpected_failure(failure, where="wysyłka do Skrzynki Zgłoszeń")
             with self._changed:
                 if not self._again:
                     self._draining = False
-                    if self._stopped_on is not None and not self._retry_armed:
+                    if (busy or self._stopped_on is not None) and not self._retry_armed:
                         self._retry_armed = True
                         self._clock.after(RETRY_S, self._woken)
                     self._changed.notify_all()

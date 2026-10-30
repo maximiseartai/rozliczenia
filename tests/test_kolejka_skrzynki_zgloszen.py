@@ -7,15 +7,27 @@ Centrum nieosiągalna rozsądnym kosztem.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import threading
 
 import pytest
 
 from rozliczenia.centrum.keyed_box import KeyedBox
 from rozliczenia.centrum.log import CentrumLog
-from rozliczenia.centrum.outbox import RETRY_S, Frame, NewIssue, Outbox, PeriodThread, Post, ReportIssue
+from rozliczenia.centrum.outbox import (
+    PASS_LOCK_FILE,
+    RETRY_S,
+    Frame,
+    NewIssue,
+    Outbox,
+    PeriodThread,
+    Post,
+    ReportIssue,
+)
 from rozliczenia.centrum.report_box import COMMENT_LIMIT, Refused, Rejected, Unreachable
 
 from tests.fixtures.centrum import FakeIssue, FakeReportBox
@@ -89,7 +101,9 @@ class Queue:
         return names
 
     def files(self) -> list[str]:
-        return sorted(path.name for path in self.directory.glob("*"))
+        """Pliki kolejki i pliki tymczasowe, bez pliku blokady przejścia."""
+
+        return sorted(path.name for path in self.directory.glob("*") if path.name != PASS_LOCK_FILE)
 
     def log(self) -> str:
         return self.log_path.read_text(encoding="utf-8") if self.log_path.is_file() else ""
@@ -397,19 +411,78 @@ def test_druga_kolejka_na_tym_folderze_nie_wysyla_pliku_w_trakcie_wysylki_pierws
     assert queue.files() == []
 
 
-def test_przejscie_pominiete_przez_druga_kolejke_robi_pierwsza_po_swoim(tmp_path: Path) -> None:
-    hold = threading.Event()
-    queue = Queue(tmp_path, FakeReportBox(open_hold=hold, outcomes=[Unreachable()]))
+# Stary proces Centrum, który zwolnił port, a jego kolejka jeszcze wysyła: przejście czeka na skrzynkę bez końca, a
+# plik ``argv[2]`` mówi, że już o nią pyta. Moduł ``Outbox`` z importu tego pliku: mutacje zmiany wybierają testy po
+# grafie importów.
+OLD_PROCESS_IN_PASS = f"""
+import pathlib, sys, threading
+
+from rozliczenia.centrum.clock import SYSTEM_CLOCK
+from rozliczenia.centrum.keyed_box import KeyedBox
+from rozliczenia.centrum.log import CentrumLog
+from {Outbox.__module__} import Outbox
+
+
+class SearchingBox:
+    def labelled_issues(self, label, *, include_closed, key):
+        pathlib.Path(sys.argv[2]).touch()
+        threading.Event().wait()
+
+
+box = KeyedBox(SearchingBox(), lambda: {KEY!r}, clock=SYSTEM_CLOCK)
+log = CentrumLog(pathlib.Path(sys.argv[3]))
+Outbox(pathlib.Path(sys.argv[1]), box, log, clock=SYSTEM_CLOCK).resume()
+threading.Event().wait()
+"""
+
+
+def test_nowe_centrum_nie_wysyla_w_trakcie_przejscia_kolejki_starego_procesu_i_wysyla_po_jego_koncu(
+    tmp_path: Path,
+) -> None:
+    queue = Queue(tmp_path, FakeReportBox())
     queue.queued("treść\n")
+    searching = tmp_path / "stary-proces-pyta-skrzynke"
+    old = subprocess.Popen(
+        [sys.executable, "-c", OLD_PROCESS_IN_PASS, str(queue.directory), str(searching), str(tmp_path / "stary.log")],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+    )
+    try:
+        assert wait_for(searching.exists), "kolejka starego procesu nie zaczęła przejścia"
+        queue.outbox.resume()
+        assert not queue.outbox.wait_delivered("", THREAD.label, timeout_s=30)
+        asked_during_old_pass = list(queue.box.listed)
+    finally:
+        old.kill()
+        old.wait(30)
+
+    def retried() -> bool:
+        queue.clock.advance(RETRY_S)
+        return queue.box.wait_until(lambda box: len(box.issues) == 1, seconds=1)
+
+    assert asked_during_old_pass == []
+    assert wait_for(retried)
+    assert wait_for(lambda: queue.files() == [])
+    assert len(queue.box.issues) == 1
+
+
+def test_wysylka_kolejki_ktora_zastala_przejscie_drugiej_wychodzi_po_minucie(tmp_path: Path) -> None:
+    hold = threading.Event()
+    queue = Queue(tmp_path, FakeReportBox(open_hold=hold))
+    queue.queued("pierwsza\n")
     queue.outbox.resume()
     assert queue.box.opening.wait(30)
     restarted = queue.restarted()
-    restarted.resume()
+    assert restarted.post(post(["druga\n"]))
     assert not restarted.wait_delivered("", THREAD.label, timeout_s=30)
-
     hold.set()
+    queue.passed()
+    assert (len(queue.box.issues[0].comments), len(queue.files())) == (0, 1)
 
-    assert queue.box.wait_until(lambda box: len(box.issues) == 1)
+    queue.clock.advance(RETRY_S)
+
+    assert queue.box.wait_until(lambda box: len(box.issues[0].comments) == 1)
+    [issue] = queue.box.issues
+    assert issue.comments == ["Część 1/1\n\ndruga\n"]
     assert wait_for(lambda: queue.files() == [])
 
 
@@ -574,7 +647,7 @@ def test_wyslanej_wysylki_ktorej_nie_da_sie_usunac_skrzynka_nie_dostaje_drugi_ra
     assert wait_for(lambda: failed_removals() == 1)
     queue.outbox.post(post(["druga\n"]))
     assert wait_for(lambda: failed_removals() == 2)
-    queue.passed()  # inaczej nowa kolejka zastaje przejście tej i oddaje mu swoje (outbox._claimed)
+    queue.passed()  # inaczej nowa kolejka zastaje przejście tej i wysyła dopiero po RETRY_S (outbox._pass_lock)
     queue.restarted().resume()
     assert wait_for(lambda: failed_removals() == 4)
     monkeypatch.setattr(Path, "unlink", unlink)
