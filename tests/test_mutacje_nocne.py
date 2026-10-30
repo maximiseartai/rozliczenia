@@ -659,6 +659,33 @@ def test_czesc_podstawy_skilla_bez_pilnuje_ktorego_folder_sie_nie_zmienil_trafia
     assert [issue["title"] for issue in github.issues] == ["Przeżyte mutacje skilli z #26"]
     assert f"SKRYPT {podstawa}\n" in github.issues[0]["body"]
 
+
+def test_skrypt_skilla_ktory_padl_w_noc_bez_commitow_na_main_konczy_sie_fail_z_przyczyna_bez_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Skill bez pilnuje obowiązuje przy każdej zmianie, więc noc uruchamia jego podstawę także bez commitów od bazy.
+    repo, _ = _historia_skilli(tmp_path)
+    for modul in (mutacje_nocne, mutacje_skilli):
+        monkeypatch.setattr(modul, "ROOT", repo)
+    monkeypatch.setattr(mutacje_skilli, "SKILLS", repo / ".agents" / "skills")
+    podstawa = ".agents/skills/verify-d/scripts/sprawdz_d.py"
+    (repo / podstawa).parent.mkdir(parents=True)
+    (repo / podstawa).write_text("", encoding="utf-8")
+    (repo / ".agents/skills/verify-d/SKILL.md").write_text(f"---\nname: verify-d\nci: {podstawa}\nci-czesci: 2\n---\n", encoding="utf-8")
+    baza = commit(repo, "Dodaj verify-d (#24)")
+    klucz = "skill:verify-d/ci"
+    plan = plan_ci.Plan(plan_ci.NOC, 225.0, (), (plan_ci.Zadanie("mutacje-1", "mutacje", "Mutation checks (1/1)", (f"{klucz}#1/2", f"{klucz}#2/2"), 100.0),))
+    (tmp_path / "plan.json").write_text(plan.do_json(), encoding="utf-8")
+    zapisy = _wykonania(tmp_path / "zapisy", {"mutacje-1": (plan.digest, {klucz: "fail"})})
+    github = GitHubWPamieci()
+    monkeypatch.setattr(mutacje_nocne, "GhApi", lambda: github)
+
+    kod = mutacje_nocne.main(["zglos", "--baza", baza, "--zapisy", str(zapisy), "--czesci", "0", "--run", RUN, "--plan-skilli", str(tmp_path / "plan.json")])
+
+    przyczyna = f"padło {klucz}, a main nie ma commitu od bazy {baza}: porażki nie wniósł żaden PR nocy, więc nie ma issue, do którego trafi"
+    assert (kod, capsys.readouterr().out.splitlines()[-1]) == (1, f"MUTACJE NOCNE FAIL | {przyczyna}")
+    assert github.issues == []
+
 def test_zadanie_skilli_bez_zapisu_tego_planu_albo_bez_wyniku_jednostki_czerwieni_przebieg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
