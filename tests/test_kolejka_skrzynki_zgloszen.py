@@ -7,6 +7,7 @@ Centrum nieosiągalna rozsądnym kosztem.
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 import shutil
 import threading
@@ -15,12 +16,13 @@ import pytest
 
 from rozliczenia.centrum.keyed_box import KeyedBox
 from rozliczenia.centrum.log import CentrumLog
-from rozliczenia.centrum.outbox import RETRY_S, Frame, Outbox, PeriodThread, Post, ReportIssue
+from rozliczenia.centrum.outbox import RETRY_S, Frame, NewIssue, Outbox, PeriodThread, Post, ReportIssue
 from rozliczenia.centrum.report_box import COMMENT_LIMIT, Refused, Rejected, Unreachable
 
 from tests.fixtures.centrum import FakeIssue, FakeReportBox
 from tests.fixtures.clock import ManualClock
 from tests.fixtures.potomne import wait_for
+from tests.fixtures.stare_centrum import SharedBox, old_centrum, queue_on
 
 KEY = "github_pat_SYNTETYCZNY_KLUCZ"
 THREAD = PeriodThread(
@@ -89,7 +91,9 @@ class Queue:
         return names
 
     def files(self) -> list[str]:
-        return sorted(path.name for path in self.directory.glob("*"))
+        """Pliki kolejki i ich pliki tymczasowe (``*.json.tmp``), bez pliku blokady folderu."""
+
+        return sorted(path.name for path in self.directory.glob("*.json*"))
 
     def log(self) -> str:
         return self.log_path.read_text(encoding="utf-8") if self.log_path.is_file() else ""
@@ -378,7 +382,9 @@ def test_tresc_ktorej_skrzynka_odmawia_zostaje_w_kolejce_a_nastepna_wychodzi_w_t
     assert wait_for(lambda: queue.files() == [])
 
 
-def test_druga_kolejka_na_tym_folderze_nie_wysyla_pliku_w_trakcie_wysylki_pierwszej(tmp_path: Path) -> None:
+def test_druga_kolejka_na_tym_folderze_nie_wysyla_pliku_w_trakcie_wysylki_pierwszej_ani_nie_nastawia_budzenia(
+    tmp_path: Path,
+) -> None:
     # Restart Centrum w tym samym procesie: kolejka poprzedniego startu dalej zakłada issue okresu.
     hold = threading.Event()
     queue = Queue(tmp_path, FakeReportBox(open_hold=hold))
@@ -395,6 +401,7 @@ def test_druga_kolejka_na_tym_folderze_nie_wysyla_pliku_w_trakcie_wysylki_pierws
 
     assert (searched, len(queue.box.issues)) == (1, 1)
     assert queue.files() == []
+    assert queue.clock.wakes == 0  # nowa kolejka nie przeszła folderu, więc nie ma czego ponawiać
 
 
 def test_przejscie_pominiete_przez_druga_kolejke_robi_pierwsza_po_swoim(tmp_path: Path) -> None:
@@ -411,6 +418,41 @@ def test_przejscie_pominiete_przez_druga_kolejke_robi_pierwsza_po_swoim(tmp_path
 
     assert queue.box.wait_until(lambda box: len(box.issues) == 1)
     assert wait_for(lambda: queue.files() == [])
+
+
+def test_kolejki_starego_i_nowego_centrum_na_jednym_folderze_zakladaja_jedno_issue_okresu_bez_dalszych_budzen(
+    tmp_path: Path,
+) -> None:
+    # Stare Centrum po zwolnieniu portu jeszcze wysyła Kontrolę ilości i kończy się w trakcie, a nowe już startuje na tym
+    # samym folderze.
+    queue = Queue(tmp_path, FakeReportBox())
+    queue.queued("różnice\n")
+    box = SharedBox(tmp_path / "skrzynka")
+    old = old_centrum(queue.directory, tmp_path / "skrzynka", tmp_path / "logs" / "stare-centrum.log")
+    new = queue_on(queue.directory, box, queue.log_path, queue.clock)
+
+    try:
+        new.resume()
+        assert not new.wait_delivered("", THREAD.label, timeout_s=30)
+    finally:
+        old.finish()
+    queue.clock.advance(seconds=RETRY_S)
+    assert not new.wait_delivered("", THREAD.label, timeout_s=30)
+
+    assert [issue["label"] for issue in box.issues()] == ["kontrola-ilosci"]
+    assert queue.files() == []
+    assert queue.clock.wakes == 0  # przejście z blokadą kończy budzenie po cudzej blokadzie
+
+
+def test_start_centrum_bez_folderu_kolejki_go_nie_zaklada_i_nie_nastawia_budzenia(tmp_path: Path) -> None:
+    queue = Queue(tmp_path, FakeReportBox())
+
+    queue.outbox.resume()
+    queue.passed()
+
+    assert not queue.directory.exists()
+    assert queue.clock.wakes == 0
+    assert "nieoczekiwany-wyjatek" not in queue.log()
 
 
 def test_wysylka_dodana_w_trakcie_przejscia_wychodzi_bez_kolejnego_budzenia(tmp_path: Path) -> None:
@@ -444,6 +486,22 @@ def test_nieudany_komentarz_zostawia_wysylke_w_pliku(tmp_path: Path) -> None:
 
     assert wait_for(lambda: "przyczyna=brak-sieci" in queue.log())
     assert len(queue.files()) == 1
+
+
+def test_uwaga_ktorej_komentarz_skrzynka_odrzucila_dostaje_reszte_czesci_w_swoim_issue_po_starcie(
+    tmp_path: Path,
+) -> None:
+    queue = Queue(tmp_path, FakeReportBox(comment_outcomes=[Rejected()]))
+    note = Post(NewIssue("uwaga-taty", "Uwaga taty"), None, RUN_ID, None, ("Część 1/2\n\na", "Część 2/2\n\nb"))
+
+    queue.outbox.post(note)
+    queue.passed()
+    queue.restarted().resume()
+
+    assert wait_for(lambda: queue.files() == [])
+    [issue] = queue.box.issues_with("uwaga-taty")
+    assert (issue.body, issue.comments) == ("Część 1/2\n\na", ["Część 2/2\n\nb"])
+    assert queue.delivered == [(RUN_ID, issue.number)]
 
 
 def test_wysylka_ktorej_nie_da_sie_zapisac_przepada_bez_wyjatku(tmp_path: Path) -> None:
@@ -516,8 +574,9 @@ def test_zapis_urwany_przez_utrate_zasilania_znika_przy_starcie_i_nie_jest_wysyl
         '{"schema_version": 2}',
         post(["x"]).to_json().replace('"schema_version": 2', '"schema_version": 3'),
         post(["x"]).to_json().replace('"kontrola-ilosci"', '"inna-etykieta"'),
+        post(["x"]).to_json().replace('"issue": null', '"issue": "7"'),
     ],
-    ids=["urwany", "nie-obiekt", "bez-celu", "nowszy-schemat", "nieznana-etykieta"],
+    ids=["urwany", "nie-obiekt", "bez-celu", "nowszy-schemat", "nieznana-etykieta", "numer-issue-napisem"],
 )
 def test_plik_kolejki_ktorego_nie_da_sie_odczytac_zostaje_z_jednym_wpisem_i_nie_wstrzymuje_innych(
     tmp_path: Path, text: str
@@ -536,6 +595,61 @@ def test_plik_kolejki_ktorego_nie_da_sie_odczytac_zostaje_z_jednym_wpisem_i_nie_
 
     assert queue.log().count(f"skrzynka-nieczytelny plik={broken}") == 1
     assert "nieoczekiwany-wyjatek" not in queue.log()
+    queue.passed()
+    assert queue.clock.wakes == 0  # treść nie zmieni się sama, więc ponowienie jej nie pomoże
+
+
+def locked_reads(monkeypatch: pytest.MonkeyPatch, queue: Queue, times: int | None) -> None:
+    """``read_text`` pliku kolejki rzuca ``PermissionError`` ``times`` razy (``None``: zawsze), jak plik, który trzyma
+    OneDrive albo antywirus."""
+
+    read_text = Path.read_text
+    failures = itertools.count(1)
+
+    def locked(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if path.parent == queue.directory and (times is None or next(failures) <= times):
+            raise PermissionError("plik otwarty w innym programie")
+        return read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+
+
+def test_plik_kolejki_ktorego_raz_nie_da_sie_odczytac_wychodzi_po_minucie_bez_kolejnej_wysylki(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = Queue(tmp_path, FakeReportBox())
+    [name] = queue.queued("treść\n")
+    locked_reads(monkeypatch, queue, times=1)
+
+    queue.outbox.resume()
+    queue.passed()
+    assert (queue.box.issues, queue.files()) == ([], [name])
+    queue.clock.advance(RETRY_S)
+
+    assert queue.box.wait_until(lambda box: len(box.issues) == 1)
+    assert wait_for(lambda: queue.files() == [])
+    queue.passed()
+    assert queue.clock.wakes == 0
+    assert queue.log().count(f"skrzynka-nieczytelny plik={name}") == 1
+
+
+def test_plik_kolejki_ktorego_nigdy_nie_da_sie_odczytac_ponawia_co_minute_z_jedna_linia_dziennika(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = Queue(tmp_path, FakeReportBox())
+    [name] = queue.queued("treść\n")
+    locked_reads(monkeypatch, queue, times=None)
+    queue.outbox.resume()
+    queue.passed()
+
+    for _ in range(3):
+        assert queue.clock.wakes == 1
+        queue.clock.advance(RETRY_S)
+        queue.passed()
+
+    assert (queue.box.issues, queue.box.keys, queue.files()) == ([], [], [name])
+    [line] = queue.log().splitlines()
+    assert f"skrzynka-nieczytelny plik={name}" in line
 
 
 def test_wyslanej_wysylki_ktorej_nie_da_sie_usunac_skrzynka_nie_dostaje_drugi_raz(

@@ -21,10 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 from types import ModuleType
 from typing import NamedTuple
 
@@ -45,7 +42,7 @@ PROMISES = {
     "CzesciWKolejnosci": "część k stoi w issue przed częścią k-1 tej samej wysyłki.",
     LIVENESS: "awarie się skończyły, a plik wysyłki bez znacznika zostaje w kolejce.",
 }
-# Kod, na którym stoją akcje Start, Zamknij i KoniecProcesu (znalezisko ``dwa_procesy``), w plikach, które Centrum
+# Kod, na którym stoją akcje Start, Zamknij i KoniecProcesu (stare i nowe Centrum naraz), w plikach, które Centrum
 # zmienia często: rozjazd liczą tylko te definicje, a nie cały plik, jak tabela pokrycia w ``SKILL.md``.
 DEFINITIONS = {
     "src/rozliczenia/centrum/app.py": ("lifespan",),
@@ -160,7 +157,7 @@ def _moved_definitions(tools: ModuleType, root: Path, skill_md: str) -> str | No
         ]
     if not moved:
         return None
-    return f"kod znaleziska dwa_procesy zmienił się od {sync.group(1)}: {', '.join(moved)}. Sprawdź Start, Zamknij i KoniecProcesu."
+    return f"kod procesów Centrum zmienił się od {sync.group(1)}: {', '.join(moved)}. Sprawdź Start, Zamknij i KoniecProcesu."
 
 
 def _definition(source: str | None, name: str) -> str | None:
@@ -222,35 +219,10 @@ def _run(java: str, jar: Path, name: str, forgiven: frozenset[tuple[str, str]]) 
 
 
 def _tlc(java: str, jar: Path, name: str, config: str) -> str:
-    """Wyjście TLC dla specyfikacji modelu z konfiguracją ``config`` (treść pliku ``name.cfg``)."""
+    """Wyjście TLC dla specyfikacji modelu z konfiguracją ``config`` (treść pliku ``name.cfg``), jak w ``_tools``."""
 
-    # TLC zapisuje ślady i stany obok specyfikacji, więc działa na kopii w katalogu tymczasowym.
-    with tempfile.TemporaryDirectory(prefix="tlc-") as work:
-        shutil.copy2(MODEL / SPEC, work)
-        Path(work, f"{name}.cfg").write_text(config, encoding="utf-8")
-        result = subprocess.run(
-            [
-                java,
-                "-XX:+UseParallelGC",
-                "-cp",
-                str(jar),
-                "tlc2.TLC",
-                "-workers",
-                "auto",
-                "-metadir",
-                str(Path(work, "stany")),
-                "-config",
-                f"{name}.cfg",
-                SPEC,
-            ],
-            cwd=work,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-    return result.stdout + result.stderr
+    output: str = _tools()._tlc(java, jar, MODEL / SPEC, name, config)
+    return output
 
 
 def _violated(output: str) -> str | None:

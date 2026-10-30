@@ -1,6 +1,6 @@
 ---
 name: verify-kolejka-skrzynki
-description: Exhaustively check that the Kolejka Skrzynki Zgłoszeń (`Outbox` in `src/rozliczenia/centrum/outbox.py`) delivers every part of every wysyłka (Zgłoszenie, Kontrola ilości, Logi Uruchomienia, Uwaga taty) at least once, keeps one issue per problem and per period, and empties the queue, under every order of network failures, answers lost after the Skrzynka acted, file errors and a killed Centrum. Use when a change touches `_deliver*`, `_comment_all`, `_waiting`, `Outbox._drain`, `_send_all`, `_remove`, `resume` or the delivery marker in `outbox.py`, the box calls in `keyed_box.py` or `newest_with_line` in `report_box.py`, `replace_atomically` in `atomic_file.py`, adds a new `Target`, or when `explore_outbox.py` or `sprawdz_model_kolejki.py` fails. A TLA+ model of the same queue (TLC) adds the interleavings the checker leaves out (a wysyłka posted during a pass, the `RETRY_S` wake, two queues of one folder in `_claimed`, a second Centrum whose port the old one already released, and a switch-off at the temporary file and at the rename).
+description: Exhaustively check that the Kolejka Skrzynki Zgłoszeń (`Outbox` in `src/rozliczenia/centrum/outbox.py`) delivers every part of every wysyłka (Zgłoszenie, Kontrola ilości, Logi Uruchomienia, Uwaga taty) at least once, keeps one issue per problem and per period, and empties the queue, under every order of network failures, answers lost after the Skrzynka acted, file errors and a killed Centrum. Use when a change touches `_deliver*`, `_comment_all`, `_waiting`, `Outbox._drain`, `_send_all`, `_remove`, `resume`, the folder lock (`_folder_lock`) or the delivery marker in `outbox.py`, the box calls in `keyed_box.py` or `newest_with_line` in `report_box.py`, `replace_atomically` in `atomic_file.py`, adds a new `Target`, or when `explore_outbox.py` or `sprawdz_model_kolejki.py` fails. A TLA+ model of the same queue (TLC) adds the interleavings the checker leaves out (a wysyłka posted during a pass, the `RETRY_S` wake, two queues of one folder in `_claimed` and in the folder lock, a second Centrum whose port the old one already released, and a switch-off at the temporary file and at the rename).
 pilnuje:
   - src/rozliczenia/centrum/outbox.py
   - src/rozliczenia/centrum/keyed_box.py
@@ -68,8 +68,8 @@ step of this code that the checker can fail, lose or kill:
 | a box write | `KeyedBox.open_issue` and `comment`, called by `_deliver_new_issue`, `_deliver_report`, `_deliver_to_period`, `_comment_all` |
 | the delivery marker | `Outbox._send_all`: `replace_atomically(path, _queue_text(post, delivered_parts=len(post.parts)))` in `suppress(OSError)` |
 | the removal of a queue file | `Outbox._remove` (`path.unlink`, `_undeleted`) |
-| a pass of the queue | `Outbox._drain` (`_claimed`, `_send_all`, `_released`), run only when the real `Outbox.send_in_background` starts the queue thread (called by `Outbox.post`, `Outbox.resume` and `Outbox._woken`); the checker replaces only `threading.Thread` in `outbox.py`, which hands it the target |
-| the `RETRY_S` wake | `Outbox._drain`: `self._clock.after(RETRY_S, self._woken)` when `_stopped_on` is set and no wake is armed; the checker calls an armed wake when nothing else asked for a pass, and a restart drops it with its process |
+| a pass of the queue | `Outbox._drain` (`_claimed`, `_folder_lock`, `_send_all`, `_released`), run only when the real `Outbox.send_in_background` starts the queue thread (called by `Outbox.post`, `Outbox.resume` and `Outbox._woken`); the checker replaces only `threading.Thread` in `outbox.py`, which hands it the target, and runs one Centrum at a time, so the pass always gets the folder lock |
+| the `RETRY_S` wake | `Outbox._drain`: `self._clock.after(RETRY_S, self._woken)` when `_stopped_on`, `_read_failed` or `_locked_out` is set and no wake is armed; the checker calls an armed wake when nothing else asked for a pass, and a restart drops it with its process |
 | a restart of Centrum | a new `Outbox` and `KeyedBox` on the same folder, then `Outbox.resume` |
 
 Covered files: `src/rozliczenia/centrum/outbox.py`,
@@ -78,23 +78,31 @@ Covered files: `src/rozliczenia/centrum/outbox.py`,
 `KeyedBox.find_issue` finds the issue of a Zgłoszenie or a period, and
 `src/rozliczenia/centrum/atomic_file.py` `replace_atomically`, which writes
 every queue file and its marker (the model only). The model's `Start`, `Zamknij`
-and `KoniecProcesu`, on which the known finding `dwa_procesy` stands, also
-cover three definitions in files that Centrum changes often: `lifespan` in
-`app.py`, `listen_locally` and `_listen_when_released` in `launcher.py`, and
-`_GRACEFUL_SHUTDOWN_S`, `serve` and `_Server` in `server.py` (`DEFINITIONS` in
-`sprawdz_model_kolejki.py`). Only a change to these definitions, not to the
+and `KoniecProcesu`, which let an old and a new Centrum process share the queue
+folder (configuration `dwa-procesy`), also cover three definitions in files
+that Centrum changes often: `lifespan` in `app.py`, `listen_locally` and
+`_listen_when_released` in `launcher.py`, and `_GRACEFUL_SHUTDOWN_S`, `serve`
+and `_Server` in `server.py` (`DEFINITIONS` in `sprawdz_model_kolejki.py`). Only a change to these definitions, not to the
 rest of their files, is drift. Name these three files here without their
 `src/…` path in backticks: such a path makes the whole file covered.
 
-**Sync commit: `6f94edb8`** (2026-10-29, `main` before the TLA+ model). The
-checker and the model share it: at this commit both were confirmed to
-describe the code above. Since the checker's earlier sync `8122ab4c` only
-`15362856` changed a covered file: `Outbox` calls `on_rejected` after a
-refused content, which neither the checker nor the model describes. To see
-whether they need another look:
+**Sync commit: `b23f4180`** (2026-10-30, #666: a pass of the queue holds the
+system lock of `przejscie.lock` in the queue folder, `_folder_lock`, and a
+queue that finds it held by another Centrum process arms the `RETRY_S` wake).
+The checker and the model share it: at this commit both were confirmed to
+describe the code above. The checker runs one Centrum at a time and always
+gets the lock, so #666 changed only the model. Before it, `2900e8c2` (#664
+merged with `main` after #665: a queue file that `_queued` cannot read arms
+the `RETRY_S` wake, and after a refused comment the queue file keeps the
+number of the Uwaga's issue) was the sync of both; the checker never fails a
+read and leaves `Rejected` out, so neither fix changed its schedules. Before
+them, `6f94edb8` was the sync of both, and since the checker's earlier sync
+`8122ab4c` only `15362856` changed a covered file: `Outbox` calls
+`on_rejected` after a refused content, which neither the checker nor the
+model describes. To see whether they need another look:
 
 ```bash
-git log --oneline 6f94edb8..HEAD -- src/rozliczenia/centrum/outbox.py src/rozliczenia/centrum/keyed_box.py src/rozliczenia/centrum/report_box.py src/rozliczenia/centrum/atomic_file.py
+git log --oneline b23f4180..HEAD -- src/rozliczenia/centrum/outbox.py src/rozliczenia/centrum/keyed_box.py src/rozliczenia/centrum/report_box.py src/rozliczenia/centrum/atomic_file.py
 ```
 
 A change to the three definitions above shows as a `UWAGA:` line of
@@ -172,17 +180,18 @@ out and why.
 Not covered: a key that is missing or refused (`NoKey`, `Refused`: the pass
 stops, nothing is sent, and `KeyedBox` keeps a refusal for `REFUSED_KEPT_S`),
 content the Skrzynka rejects (`Rejected`: the file waits for the next start,
-and the same content would be rejected again), Maks closing or deleting an
+and the same content would be rejected again; after a refused comment to the issue
+of an Uwaga it opened, the file keeps that issue's number, `Opened`), Maks closing or deleting an
 issue (`Gone`, `closed="reuse"`), a part posted twice (after a lost comment
 answer or a restart, accepted as at least once and not a rule here), a
-delivered file with its marker that waits for the next start, two queues on one folder (`_claimed`), a
-process killed in the middle of `replace_atomically` (it leaves a `.tmp` that
+delivered file with its marker that waits for the next start, two queues on one folder (`_claimed`,
+`_folder_lock`), a process killed in the middle of `replace_atomically` (it leaves a `.tmp` that
 `resume` removes), `prepare` holding a wysyłka back, a queue thread running at
 the same time as `post` or `wait_delivered` (the checker runs each thread to its
 end), `on_delivered` (Sprawy taty), and
 more wysyłki or failures than the bounds above. The TLA+ model below checks, on its
-own abstraction of this code, two queues on one folder, a process killed in
-the middle of `replace_atomically`, a queue thread running at the same time
+own abstraction of this code, two queues on one folder, also in two Centrum
+processes, a process killed in the middle of `replace_atomically`, a queue thread running at the same time
 as `post`, refused content and two file errors in a row.
 
 ## Known findings
@@ -324,11 +333,15 @@ the causes ADR 0015 („zerwane połączenie po utworzeniu issue może dać drug
 issue”) and the docstring of `outbox.py` („Przerwanie między wysłaniem a
 znacznikiem powtarza wysyłkę”) name, each recorded in `slady` where it
 happens: a lost answer to `open_issue`, a network failure or a lost answer
-at a `comment`, a switch-off at a `comment`, at the marker or at `_remove`
-after the marker failed (`zerwane_po_zalozeniu`), and the end of a Centrum
-run that leaves a sent file whose marker and removal both failed
-(`bez_znacznika`, the comment in `_send_all`: „bez znacznika chroni już
-tylko _undeleted, do końca tej pracy Centrum”). A period and a Zgłoszenie
+at a `comment`, a switch-off at a `comment`, at the issue number after a
+refused comment, at the marker or at `_remove` after the marker failed
+(`zerwane_po_zalozeniu`), the end of a Centrum run that leaves a sent file
+whose marker and removal both failed (`bez_znacznika`, the comment in
+`_send_all`: „bez znacznika chroni już tylko _undeleted, do końca tej pracy
+Centrum”), and the end of a Centrum run that leaves an Uwaga whose comment
+the Skrzynka refused and whose issue number could not be written
+(`bez_numeru`, the comment in `_send_all`: „chroni wtedy już tylko
+_rejected, do końca tej pracy Centrum”). A period and a Zgłoszenie
 have their line, so `find_issue` keeps them to one issue in one Centrum
 process, also after these causes and with two queues of one folder. A part
 posted twice is at least once and nothing detects it either.
@@ -340,18 +353,19 @@ The comment above each action and branch in the model names the same code.
 
 | Model action | Code |
 | --- | --- |
-| `Start` | `app.py` `lifespan` → `outbox.py` `Outbox.resume`: unlink every `*.tmp`, then `send_in_background`. Only a process with the port starts (`launcher.py` `listen_locally`); a second queue of one process starts while the first runs |
+| `Start` | `app.py` `lifespan` → `outbox.py` `Outbox.resume`: unlink every `*.tmp` (also one that the old process still writes: its `post` returns `False`, its marker is lost), then `send_in_background`. Only a process with the port starts (`launcher.py` `listen_locally`); a second queue of one process starts while the first runs |
 | `Nadaj` | `outbox.py` `Outbox.post`: the name from the moment and `next(self._sequence)`, `replace_atomically` (`write_text` of `.json.tmp`, then `replace`; `OSError` → `False`, also the `FileNotFoundError` of `replace` when `resume` of a new process removed the `.tmp`), then `send_in_background` |
-| `Petla` | `Outbox._drain`: `_claimed` (taken → ask for another pass and skip `_send_all`), then `sorted(glob("*.json"))` in `_send_all` |
-| `Plik` | `Outbox._send_all` for one file: `_undeleted` → `_remove`, `_rejected` → skip, `_queued` (an `OSError` or a missing file → `_skip_unreadable`), `delivered` → `_remove`, else `_deliver`; the end of the list sets `_stopped_on = None` |
-| `Szukaj` | `keyed_box.py` `KeyedBox.labelled_issues` / `find_issue` (`report_box.py` `newest_with_line`) in `_deliver_to_period`, `_deliver_report` (a found Zgłoszenie is `Delivered(found, ())`), `_deliver_to_known` |
+| `Petla` | `Outbox._drain`: `_claimed` (taken → ask for another pass and skip `_send_all`), then `_folder_lock` without waiting (held by a queue of another process → `_locked_out` and skip `_send_all`), then `_read_failed = False` and `sorted(glob("*.json"))` in `_send_all` |
+| `Plik` | `Outbox._send_all` for one file: `_undeleted` → `_remove`, `_rejected` → skip, `_queued` (an `OSError` or a missing file → `_read_failed` and `_skip_unreadable`), `delivered` → `_remove`, else `_deliver` (with the file's issue number, `_deliver_to_known`); the end of the list sets `_stopped_on = None` |
+| `Szukaj` | `keyed_box.py` `KeyedBox.labelled_issues` / `find_issue` (`report_box.py` `newest_with_line`) in `_deliver_to_period`, `_deliver_report` (a found Zgłoszenie is `Delivered(found, ())`), `_deliver_to_known` (also for the issue number in the file: the comments of `Post.opening`) |
 | `Zaloz` | `KeyedBox.open_issue` in `_deliver_new_issue`, `_deliver_report`, `_deliver_to_period`, with `Post.opening` |
 | `Komentuj` | `KeyedBox.comment` in `_comment_all`, one part per step; the first failure ends the wysyłka |
 | `Stop`, `Odrzuc` | `_waiting`: `Unreachable`, `Refused`, `NoKey` → `_stopped_on` and `return`; `Rejected` → `_rejected` and the next file |
+| `ZapiszNumer`, `ZamienNumer` | `_send_all` after `Opened` (`_deliver_new_issue`: a `Rejected` comment after `open_issue`): the issue number in suppress(OSError), `replace_atomically(path, _queue_text(..., issue=...))` as for the marker, then `Rejected` |
 | `Znacznik`, `Zamiana` | `_send_all` after `Delivered`: `_stopped_on = None`, then the marker in `suppress(OSError)`: `atomic_file.py` `replace_atomically` (`write_text` of `.json.tmp`, then `replace`; an `OSError` unlinks the `.tmp`) |
 | `Usun` | `Outbox._remove`: `unlink(missing_ok=True)`, an `OSError` adds the name to `_undeleted` |
-| `Zwolnij` | `Outbox._drain` `finally`: `_released`; a request of the other queue sets `_again` |
-| `Decyzja` | `Outbox._drain` under `_changed`: `_again` → another pass, else `_draining = False` and `clock.after(RETRY_S, _woken)` when `_stopped_on` is set and no wake is armed |
+| `Zwolnij` | `Outbox._drain`: the end of `_folder_lock` (the lock file closed), then `finally` with `_released`; a request of the other queue sets `_again` |
+| `Decyzja` | `Outbox._drain` under `_changed`: `_again` → another pass, else `_draining = False` and `clock.after(RETRY_S, _woken)` when `_stopped_on`, `_read_failed` or `_locked_out` is set and no wake is armed |
 | `Budzenie` | `Outbox._woken` (`_retry_armed = False`, `send_in_background`), also in a process that already closed its port |
 | `Zamknij`, `KoniecProcesu` | `server.py` `serve`: uvicorn closes the socket, waits up to `_GRACEFUL_SHUTDOWN_S` (5 s) for open connections, then the process ends and the daemon queue thread dies with it |
 | `Wylacz` | none: the computer switches off or the process dies; the queue folder and the Skrzynka stay |
@@ -359,7 +373,7 @@ The comment above each action and branch in the model names the same code.
 Ghost variables have no counterpart in the code and serve only the promises:
 `zakolejkowane` (`post` returned `True`), `odrzucone` (the Skrzynka answered
 `Rejected` for this wysyłka), `bezOchrony` (a sent file whose marker and
-removal both failed), `slady` (causes of the accepted risk and of the known
+removal both failed, or an Uwaga whose issue number could not be written), `slady` (causes of the accepted risk and of the known
 findings) and `krok` (the counterexample's words).
 
 ### Bring the model in line, then run
@@ -422,9 +436,9 @@ configuration is checked in full.
 | `zgloszenie-w-czesciach` | one Zgłoszenie in 2 parts; 1 of each failure | known finding `przejecie` |
 | `znane` | a comment in 2 parts to the known issue of an Uwaga; 2 network failures, 1 lost answer, 2 file errors, 1 switch-off | passes |
 | `dwie-kolejki` | two queues of one folder in one process, one Kontrola in 2 parts; 1 network failure, 1 file error, 1 switch-off | passes |
-| `dwa-procesy` | one Kontrola; the old Centrum closes its port and the new one starts before the old process ends; no other failure | known finding `dwa_procesy` |
-| `odczyt` | one Kontrola; 1 network failure, 1 read error of the queue file, 1 switch-off | known finding `odczyt` |
-| `odmowa-tresci` | one Uwaga in 2 parts; 1 refused content, 1 switch-off | known finding `odmowa_po_zalozeniu` |
+| `dwa-procesy` | one Kontrola; the old Centrum closes its port and the new one starts before the old process ends; no other failure | passes |
+| `odczyt` | one Kontrola; 1 network failure, 1 read error of the queue file, 1 switch-off | passes |
+| `odmowa-tresci` | one Uwaga in 2 parts; 2 refused contents, 1 file error, 1 switch-off | passes |
 
 Every configuration checks `TypeOK`, `JednoIssue`, `WszystkieCzesci`,
 `CzesciWKolejnosci` and `Zbieganie`. `Zbieganie` holds only under the
@@ -441,31 +455,6 @@ its bound.
    lost), the next start finds #1 by its odcisk line, `_deliver_report`
    returns `Delivered(found, ())`, and the marker and removal follow. Part 2
    never reaches the Skrzynka.
-2. **`dwa-procesy`, JednoIssue (`dwa_procesy`)**: the new Centrum starts
-   while the old process still ends. Steps: Centrum A starts; uvicorn closes
-   A's socket (Dad closes Centrum, or the restart guardian restarts it); A's
-   process waits up to `_GRACEFUL_SHUTDOWN_S` for open connections, and its
-   queue thread keeps running; Centrum B takes the free port and `resume`
-   starts B's pass; a Kontrola waits in the queue; A's pass and B's pass both
-   find no issue okresu and both call `open_issue`. Two issues okresu. `_claimed`
-   guards only queues of one process, and the port is free before the old
-   process ends. It needs A's queue thread in a pass, or its `RETRY_S` wake, in
-   the seconds between the closed socket and the end of A, while B already
-   sends. In the same window the docstring of `Outbox.resume` („żaden `*.tmp`
-   nie ma teraz autora”) is not true: B's `resume` can remove the `.tmp` of a
-   `post` that A still writes, and that `post` returns `False`.
-3. **`odczyt`, Zbieganie (`odczyt`)**: `_queued` gets an `OSError` reading a
-   queue file (something holds it open), `_skip_unreadable` skips it, the pass
-   ends with `_stopped_on = None`, so `_drain` arms no `RETRY_S` wake. The
-   file waits for the next wysyłka or the next start of Centrum, with the
-   network working.
-4. **`odmowa-tresci`, JednoIssue (`odmowa_po_zalozeniu`)**: `open_issue`
-   opens the issue of an Uwaga, the Skrzynka refuses a `comment` (`Rejected`),
-   the file waits for the next start (`_rejected`), and the next start opens a
-   second issue with the same Uwaga. The model allows one refusal; by the code,
-   every later start opens one more issue while the comment stays refused. `Post.of` keeps every part within `COMMENT_LIMIT`, which #332
-   measured, so a refused comment is not expected; this is what the code does
-   if GitHub refuses one.
 
 A known finding lives in `model/oczekiwane.json` with the promise it breaks
 and the cause it is excused after. When a change fixes it, the check ends with `ZNALEZISKO ZNIKNĘŁO`.
@@ -488,6 +477,25 @@ Checked only with the bounds in the configurations. Assumed and not checked:
 
 - A second Centrum with the port while another has it: `launcher.py`
   `listen_locally` excludes it, and `Start` takes it as given.
+- A lock file that cannot be opened (no queue folder yet): `_folder_lock`
+  lets the pass go without the lock. The model's folder always exists.
+- `_claimed` guards no promise of the model: the folder lock keeps two queues
+  of one process apart too, because each opens the lock file on its own.
+  `_claimed` only spares the second queue the `RETRY_S` wait, time the model
+  does not have; `test_przejscie_pominiete_przez_druga_kolejke_robi_pierwsza_po_swoim`
+  checks that hand-over.
+- Every box call returns (`Watek` is weakly fair). A call that hangs holds the
+  folder lock only until its process ends: `KoniecProcesu` does not wait for
+  the queue thread, as `serve` does not.
+- `Nadaj` starts a `post` only in a process with the port. An HTTP request
+  that the old Centrum received before it closed its socket may call `post`
+  only after the new Centrum's `resume`; when the old process ends before its
+  queue sends that file, the file waits for the new Centrum's next wysyłka or
+  start. Removing `*.tmp` in `resume` only under the folder lock would let a
+  `post` that the old Centrum began before the new one started end the same
+  way inside the model (TLC's counterexample in `dwa-procesy`, `Zbieganie`),
+  so `resume` removes every `*.tmp` as before, and such a `post` returns
+  `False`.
 - `labelled_issues` sees an issue right after `open_issue` returned. A list
   that lags behind could let a retry open a second issue okresu or
   Zgłoszenie; the next retry comes `RETRY_S` later.
@@ -519,31 +527,30 @@ one guard or step whose code it names, on a copy of the checkout
 (`tools/mutacje.py`), and must end with `MODEL KOLEJKI: NOWE NARUSZENIE`:
 
 - JednoIssue: an issue okresu opened without looking for it; a Zgłoszenie
-  opened without looking for it; `_claimed` that always lets a queue send; an
+  opened without looking for it; `_claimed` that always lets a queue send
+  together with a folder lock that is always free (`dwie-kolejki`), and a pass
+  without the folder lock (`dwa-procesy`); an
   Uwaga that opens two issues; no delivery marker; a file in `_undeleted`
-  sent again in the same Centrum run; and, as a model check without code, the
+  sent again in the same Centrum run; a refused comment after `open_issue`
+  that does not write the issue number, and a file with the number that opens
+  an issue again (`odmowa-tresci`); and, as a model check without code, the
   accepted risk removed from JednoIssue (the risk is reachable).
 - WszystkieCzesci: a failed comment skipped instead of ending the wysyłka; a
   Zgłoszenie that never posts its comments, with the network working; and, in
-  the configurations of known findings that excuse another promise, a refused
-  comment that removes the file instead of `_rejected` (`odmowa-tresci`, which
-  excuses only JednoIssue after `odmowa_po_zalozeniu`) and an unreadable file
-  removed instead of skipped by `_skip_unreadable` (`odczyt`, which excuses
-  only Zbieganie after `odczyt`).
+  the configurations with a refused comment or a read error, a refused
+  comment that removes the file instead of `_rejected` (`odmowa-tresci`) and
+  an unreadable file removed instead of skipped by `_skip_unreadable`
+  (`odczyt`); a `post` that returns True although
+  `os.replace` raised OSError (`okres`) or although `resume` of the new
+  Centrum removed its `.json.tmp` (`dwa-procesy`).
 - CzesciWKolejnosci: comments posted from the last part.
 - Zbieganie: a network failure that skips the file to the next start; a pass
-  that stops without `_stopped_on`; no `RETRY_S` wake; a wake that does not
+  that stops without `_stopped_on`; no `RETRY_S` wake; no `RETRY_S` wake after
+  an unreadable file (`_read_failed`, `odczyt`) or after a folder lock held by
+  another process (`_locked_out`, `dwa-procesy`); a wake that does not
   ask for a pass (`_woken`); `post` without `send_in_background`; `_again`
   ignored; a pass that does not clear `_draining`; `resume` without
   `send_in_background`.
 
-Two mutations fix a known finding in the model (a found Zgłoszenie gets its
-other parts; the new Centrum waits until the old process ends) and must end
-with `MODEL KOLEJKI: ZNALEZISKO ZNIKNĘŁO`. Known findings `odczyt` and
-`odmowa_po_zalozeniu` have no such fix mutation, so nothing shows that a fix
-of either would end with `ZNALEZISKO ZNIKNĘŁO`. That their configurations
-break no other promise stands on the two mutations above in `odmowa-tresci`
-and `odczyt`, each of which breaks WszystkieCzesci after the finding's cause
-and ends with `NOWE NARUSZENIE`. A second break of the same promise after the
-same cause (another second issue after a refused comment, another file that
-waits after a read error) the finding excuses, and that is not checked.
+One mutation fixes a known finding in the model (a found Zgłoszenie gets its
+other parts) and must end with `MODEL KOLEJKI: ZNALEZISKO ZNIKNĘŁO`.

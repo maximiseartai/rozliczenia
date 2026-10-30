@@ -30,7 +30,6 @@ from tests.fixtures.git_repo import commit, git, repository
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-import czasy_ci  # noqa: E402
 import mutacje_nocne  # noqa: E402
 import mutacje_skilli  # noqa: E402
 import mutacje_zmiany  # noqa: E402
@@ -232,6 +231,28 @@ def test_czesc_bez_zapisu_z_uszkodzonym_zapisem_albo_z_porazka_bez_przezytych_cz
     assert [issue["title"] for issue in github.issues] == ["Przeżyte mutacje z #11"]
     assert wyjscie[-1].startswith("MUTACJE NOCNE FAIL | część 2/4 bez zapisu: ")
     assert wyjscie[-1].endswith(f"; część 3/4: {testy_padaja}; część 4/4 bez zapisu: Expecting value: line 1 column 1 (char 0)")
+
+
+def test_przezyte_mutacje_czesci_po_limicie_czasu_trafiaja_do_issue_a_czesc_czerwieni_przebieg(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    repo, baza = _historia(tmp_path)
+    github = GitHubWPamieci()
+    po_limicie = "MUTACJE ZMIANY FAIL | limit czasu części 3300 s minął przed werdyktem 3 mutacji | przeżyło 1 | mutacje=28 | wyjątki=0 | innego systemu=0"
+    zapisy = _zapisy(tmp_path / "zapisy", {1: (OK, []), 2: (po_limicie, [_przezyta("src/a.py:1 stała")])})
+
+    kod = mutacje_nocne.zglos(github, repo, baza, zapisy, 2, RUN)
+
+    assert kod == 1
+    assert [issue["title"] for issue in github.issues] == ["Przeżyte mutacje z #11"]
+    assert capsys.readouterr().out.splitlines()[-1] == f"MUTACJE NOCNE FAIL | część 2/2: {po_limicie}"
+
+
+def test_czesc_konczy_sie_w_swoim_limicie_czasu_przed_limitem_zadania_ci_ktore_by_ja_anulowalo_bez_zapisu() -> None:
+    zadanie = _nocne()["jobs"]["change-mutations"]
+    krok = next(krok for krok in zadanie["steps"] if "tools/mutacje_zmiany.py" in krok.get("run", ""))
+
+    # Instalacja przed krokiem trwa ok. 10 s, a wgranie zapisu po nim kilka sekund (run 41019818658).
+    assert zadanie["timeout-minutes"] * 60 - mutacje_zmiany.PART_LIMIT_S >= 300
+    assert "--limit-czesci-s" not in krok["run"]
 
 
 
@@ -660,6 +681,34 @@ def test_czesc_podstawy_skilla_bez_pilnuje_ktorego_folder_sie_nie_zmienil_trafia
     assert [issue["title"] for issue in github.issues] == ["Przeżyte mutacje skilli z #26"]
     assert f"SKRYPT {podstawa}\n" in github.issues[0]["body"]
 
+
+def test_skrypt_skilla_ktory_padl_w_nocy_bez_commitow_czerwieni_przebieg_bo_nie_ma_pr_ktory_by_go_dostal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Skill bez pilnuje biegnie każdej nocy, także takiej, w której main nie dostał commitu od bazy.
+    repo, _ = _historia_skilli(tmp_path)
+    for modul in (mutacje_nocne, mutacje_skilli):
+        monkeypatch.setattr(modul, "ROOT", repo)
+    monkeypatch.setattr(mutacje_skilli, "SKILLS", repo / ".agents" / "skills")
+    github = GitHubWPamieci()
+    monkeypatch.setattr(mutacje_nocne, "GhApi", lambda: github)
+    podstawa = ".agents/skills/verify-d/scripts/sprawdz_d.py"
+    (repo / podstawa).parent.mkdir(parents=True)
+    (repo / podstawa).write_text("", encoding="utf-8")
+    (repo / ".agents/skills/verify-d/SKILL.md").write_text(f"---\nname: verify-d\nci: {podstawa}\nci-czesci: 2\n---\n", encoding="utf-8")
+    baza = commit(repo, "Dodaj verify-d (#24)")
+    klucz = "skill:verify-d/ci"
+    plan = plan_ci.Plan(plan_ci.NOC, 225.0, (), (plan_ci.Zadanie("mutacje-1", "mutacje", "Mutation checks (1/1)", (f"{klucz}#1/2", f"{klucz}#2/2"), 100.0),))
+    zapisy = _wykonania(tmp_path / "zapisy", {"mutacje-1": (plan.digest, {klucz: "fail"})})
+    (tmp_path / "plan.json").write_text(plan.do_json(), encoding="utf-8")
+
+    kod = mutacje_nocne.main(["zglos", "--baza", baza, "--zapisy", str(zapisy), "--czesci", "0", "--run", RUN, "--plan-skilli", str(tmp_path / "plan.json")])
+
+    wyjscie = capsys.readouterr().out.splitlines()
+    assert kod == 1, wyjscie
+    assert github.wyslane == []
+    assert wyjscie[-1] == f"MUTACJE NOCNE FAIL | skrypt {podstawa} padł, a od bazy {baza} main nie ma commitu, którego PR by go dostał"
+
 def test_zadanie_skilli_bez_zapisu_tego_planu_albo_bez_wyniku_jednostki_czerwieni_przebieg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -706,7 +755,7 @@ def test_zgloszenie_z_polecenia_workflow_zaklada_issue_i_konczy_sie_ok(
     assert wyjscie[-1] == "MUTACJE NOCNE OK | części 1 | przeżyło 1" + (" | zadania skilli 2 | padło skryptów 1" if ze_skryptami else "")
 
 
-PUSTA_NOC = "MUTACJE NOCNE FAIL | linia main od bazy nie ma commitów, więc przeżytej mutacji ani skryptu, który padł, nie można przypisać żadnemu PR-owi"
+PUSTA_NOC = "MUTACJE NOCNE FAIL | linia main od bazy nie ma commitów, więc przeżytej mutacji nie można przypisać żadnemu PR-owi"
 
 
 @pytest.mark.parametrize(
@@ -736,35 +785,6 @@ def test_noc_bez_commitow_od_bazy_z_przezyta_mutacja_konczy_sie_fail_a_bez_wynik
     kod = mutacje_nocne.main(["zglos", "--baza", git(repo, "rev-parse", "HEAD"), "--zapisy", str(zapisy), "--czesci", "1", "--run", RUN, "--plan-skilli", str(plan)])
 
     assert (kod, capsys.readouterr().out.splitlines()[-1]) == wynik
-    assert github.issues == []
-
-
-def test_podstawa_skilla_bez_pilnuje_ktora_padla_w_nocy_bez_commitow_konczy_sie_fail_bez_pr_do_przypisania(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo, _ = _historia_skilli(tmp_path)
-    for modul in (mutacje_nocne, mutacje_skilli):
-        monkeypatch.setattr(modul, "ROOT", repo)
-    monkeypatch.setattr(mutacje_skilli, "SKILLS", repo / ".agents" / "skills")
-    podstawa = ".agents/skills/verify-d/scripts/sprawdz_d.py"
-    (repo / podstawa).parent.mkdir(parents=True)
-    (repo / podstawa).write_text("", encoding="utf-8")
-    (repo / ".agents/skills/verify-d/SKILL.md").write_text(f"---\nname: verify-d\nci: {podstawa}\nci-czesci: 2\n---\n", encoding="utf-8")
-    baza = commit(repo, "Dodaj verify-d (#24)")
-    github = GitHubWPamieci()
-    monkeypatch.setattr(mutacje_nocne, "GhApi", lambda: github)
-    # Plan nocy od bazy, którą jest HEAD, jak ``plan_ci.py plan --zdarzenie noc``: skill bez pilnuje biegnie przy każdej zmianie.
-    wybor = mutacje_skilli.wybor(frozenset(), night=True)
-    plan = plan_ci.rozplanuj([plan_ci.wycen_mutacje([krok for krok, _ in wybor.chosen], czasy_ci.Czasy((), {}), plan_ci.NOC)], plan_ci.NOC)
-    zapisy = _wykonania(tmp_path / "zapisy", {zadanie.id: (plan.digest, {"skill:verify-d/ci": "fail"}) for zadanie in plan.zadania})
-    sciezka_planu = tmp_path / "plan-skilli" / "plan.json"
-    sciezka_planu.parent.mkdir()
-    sciezka_planu.write_text(plan.do_json(), encoding="utf-8")
-
-    kod = mutacje_nocne.main(["zglos", "--baza", baza, "--zapisy", str(zapisy), "--czesci", "0", "--run", RUN, "--plan-skilli", str(sciezka_planu)])
-
-    assert [krok.name for krok, _ in wybor.chosen] == ["PODSTAWA verify-d"]
-    assert (kod, capsys.readouterr().out.splitlines()[-1]) == (1, PUSTA_NOC)
     assert github.issues == []
 
 

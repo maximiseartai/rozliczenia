@@ -14,7 +14,8 @@ issue i przyczyna czekania (decyzja 13).
 
 Issue okresu kolejka znajduje po wierszu rozpoznawczym przy każdej próbie wysyłki i dopisuje do niego części jako
 komentarze. Bez niego zakłada nowe issue: pierwsza część (albo nagłówek) jest jego treścią, kolejne komentarzami.
-``NewIssue`` zawsze zakłada nowe issue tak samo, bez wiersza rozpoznawczego. Kto czeka na wynik (Uwaga taty),
+``NewIssue`` zawsze zakłada nowe issue tak samo, bez wiersza rozpoznawczego; gdy skrzynka odrzuci treść komentarza
+do issue, które już założyła, plik zapamiętuje jego numer i następna próba dopisuje resztę do niego. Kto czeka na wynik (Uwaga taty),
 dostaje numer issue przez ``on_delivered`` i może poczekać na dostarczenie przez ``wait_delivered``.
 
 Adres pierwszego komentarza każdej dostarczonej wysyłki (np. Logów Uruchomienia, do których prowadzi przypięta
@@ -28,13 +29,14 @@ from __future__ import annotations
 
 import itertools
 import json
+import sys
 import threading
-from collections.abc import Callable, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final, Literal, assert_never, get_args
+from typing import Any, BinaryIO, Final, Literal, assert_never, get_args
 
 from rozliczenia.centrum.atomic_file import replace_atomically
 from rozliczenia.centrum.clock import Clock
@@ -49,6 +51,11 @@ from rozliczenia.centrum.report_box import (
     Sent,
     Unreachable,
 )
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 QUEUE_DIRECTORY: Final = "kolejka"
 # Poza ``config/zgloszenia``: weryfikacja Kontroli ilości sprawdza, że jest tam tylko kolejka.
@@ -73,9 +80,12 @@ Frame = Callable[[int, int, str], str]
 
 # Foldery kolejki z trwającym przejściem w tym procesie i czy inna kolejka tego folderu prosi o następne. Dwie
 # kolejki jednego folderu (restart Centrum w procesie) nie wysyłają naraz: obie nie znalazłyby issue okresu, którego
-# druga jeszcze nie założyła, i założyłyby je dwa razy. Między procesami pilnuje tego port Centrum (``launcher``).
+# druga jeszcze nie założyła, i założyłyby je dwa razy. Kolejka, która zastanie tu przejście drugiej, nie czeka na
+# budzenie, bo druga po swoim przejściu robi następne. Kolejki dwóch procesów rozdziela blokada folderu (``_folder_lock``).
 _PASSES_LOCK: Final = threading.Lock()
 _PASSES: Final[dict[Path, bool]] = {}
+# Plik blokady folderu kolejki, obok plików kolejki; nie jest ani ``*.json``, ani ``*.tmp``.
+PASS_LOCK: Final = "przejscie.lock"
 
 
 def _claimed(directory: Path) -> bool:
@@ -92,6 +102,51 @@ def _released(directory: Path) -> bool:
 
     with _PASSES_LOCK:
         return _PASSES.pop(directory)
+
+
+@contextmanager
+def _folder_lock(directory: Path) -> Iterator[bool]:
+    """Blokada systemowa pliku ``PASS_LOCK`` w ``directory`` na czas bloku; ``False``: trzyma ją inna kolejka.
+
+    Rozdziela przejścia kolejek jednego folderu także w dwóch procesach Centrum, których ``_PASSES`` nie widzi: stare
+    Centrum po zwolnieniu portu jeszcze kończy pracę, a nowe już wysyła (Ponowny start Centrum albo skrót kliknięty
+    zaraz po zamknięciu). Blokadę zwalnia zamknięcie pliku, a system także koniec procesu, nawet zabitego, więc nie
+    zostaje po nim. Plik, którego nie da się otworzyć (folderu kolejki jeszcze nie ma), nie wstrzymuje przejścia:
+    ``True`` bez blokady.
+    """
+
+    lock_file: BinaryIO | None
+    try:
+        lock_file = (directory / PASS_LOCK).open("ab")
+    except OSError:
+        lock_file = None
+    if lock_file is None:
+        yield True
+        return
+    with lock_file:
+        if not _locked(lock_file):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            if sys.platform == "win32":  # dokumentacja LockFileEx zaleca zwolnić zakres przed zamknięciem pliku
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _locked(lock_file: BinaryIO) -> bool:
+    """Bierze blokadę bez czekania; ``False``, gdy trzyma ją inny uchwyt pliku, także w innym procesie."""
+
+    try:
+        if sys.platform == "win32":
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
 Closed = Literal["new_issue", "reuse"]
 _LABELS: Final = frozenset(get_args(Label))
 _CLOSED: Final = frozenset(get_args(Closed))
@@ -216,17 +271,22 @@ class Post:
 
 @dataclass(frozen=True)
 class _Queued:
-    """Plik kolejki: wysyłka i ile jej części skrzynka już przyjęła (wszystkie: plik czeka tylko na usunięcie)."""
+    """Plik kolejki: wysyłka i ile jej części skrzynka już przyjęła (wszystkie: plik czeka tylko na usunięcie).
+
+    ``issue``: numer issue, które założyła wcześniejsza próba tej wysyłki, zanim skrzynka odrzuciła treść jej
+    komentarza (``Opened``); następna próba dopisuje do niego komentarze zamiast zakładać drugie issue.
+    """
 
     post: Post
     delivered_parts: int
+    issue: int | None = None
 
     @property
     def delivered(self) -> bool:
         return self.delivered_parts == len(self.post.parts)
 
 
-def _queue_text(post: Post, *, delivered_parts: int) -> str:
+def _queue_text(post: Post, *, delivered_parts: int, issue: int | None = None) -> str:
     return json.dumps(
         {
             "schema_version": SCHEMA_VERSION,
@@ -236,6 +296,7 @@ def _queue_text(post: Post, *, delivered_parts: int) -> str:
             "header": post.header,
             "parts": list(post.parts),
             "delivered_parts": delivered_parts,
+            "issue": issue,
         },
         ensure_ascii=False,
         indent=2,
@@ -279,7 +340,10 @@ def _target(entry: dict[str, Any], kind: object) -> Target | None:
 
 
 def _parse(text: str) -> _Queued | None:
-    """Granica plików kolejki. ``delivered_parts`` jest opcjonalne: pliki z #273 go nie mają i nic nie dostarczyły."""
+    """Granica plików kolejki. ``delivered_parts`` jest opcjonalne: pliki z #273 go nie mają i nic nie dostarczyły.
+
+    ``issue`` też: pliki sprzed #665 go nie mają i żadna ich próba nie zostawiła założonego issue.
+    """
 
     try:
         document = json.loads(text)
@@ -300,20 +364,28 @@ def _parse(text: str) -> _Queued | None:
             tuple(_string(part) for part in document["parts"]),
         )
         delivered_parts = document.get("delivered_parts", 0)
+        issue = document.get("issue")
     except (ValueError, KeyError, TypeError):
         return None
     if type(delivered_parts) is not int or not 0 <= delivered_parts <= len(post.parts):
         return None
-    return _Queued(post, delivered_parts)
+    if issue is not None and type(issue) is not int:
+        return None
+    return _Queued(post, delivered_parts, issue)
 
 
 def _queued(path: Path) -> _Queued | None:
-    """Plik kolejki; pliku, którego nie da się odczytać, nie ma w tym przejściu."""
+    """Plik kolejki albo ``None``: uszkodzona treść albo nieznany schemat.
+
+    ``OSError`` (plik trzyma np. OneDrive albo antywirus) przechodzi do wołającego: ten sam plik może się dać odczytać
+    za chwilę, a treść, której się nie da, zostanie taka sama.
+    """
 
     try:
-        return _parse(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError):
+        text = path.read_text(encoding="utf-8")
+    except UnicodeError:
         return None
+    return _parse(text)
 
 
 def _string(value: object) -> str:
@@ -380,11 +452,25 @@ class Gone:
     number: int
 
 
+@dataclass(frozen=True)
+class Opened:
+    """Skrzynka założyła issue ``number`` nowej wysyłki (``NewIssue``), a potem odrzuciła treść jej komentarza.
+
+    Takiego issue następna próba nie znajdzie, bo nie ma wiersza rozpoznawczego, więc jego numer zapamiętuje plik.
+    """
+
+    number: int
+
+
 Failure = Refused | Rejected | Unreachable | NoKey
 """Porażka wysyłki: odmowa klucza, odmowa treści, brak sieci albo brak klucza."""
 
 
-def _deliver(post: Post, box: KeyedBox) -> Delivered | Gone | Failure:
+def _deliver(post: Post, box: KeyedBox, opened: int | None) -> Delivered | Gone | Opened | Failure:
+    """Wysyłka do jej celu; ``opened``: wcześniejsza próba założyła już to issue (``Opened``), więc tylko komentarze."""
+
+    if opened is not None:
+        return _deliver_to_known(post, KnownIssue(post.target.label, opened), box)
     match post.target:
         case PeriodThread() as thread:
             return _deliver_to_period(post, thread, box)
@@ -398,14 +484,15 @@ def _deliver(post: Post, box: KeyedBox) -> Delivered | Gone | Failure:
             assert_never(post.target)
 
 
-def _deliver_new_issue(post: Post, issue: NewIssue, box: KeyedBox) -> Delivered | Failure:
+def _deliver_new_issue(post: Post, issue: NewIssue, box: KeyedBox) -> Delivered | Opened | Failure:
     """Nowe issue z pierwszą częścią (albo nagłówkiem) i komentarze z resztą; porażka kończy wysyłkę."""
 
     body, comments = post.opening()
     opened = box.open_issue(issue.label, issue.title, body)
     if not isinstance(opened, Sent):
         return opened
-    return _comment_all(opened.number, comments, box)
+    outcome = _comment_all(opened.number, comments, box)
+    return Opened(opened.number) if isinstance(outcome, Rejected) else outcome
 
 
 def _deliver_report(post: Post, report: ReportIssue, box: KeyedBox) -> Delivered | Failure:
@@ -428,7 +515,9 @@ def _deliver_report(post: Post, report: ReportIssue, box: KeyedBox) -> Delivered
 
 
 def _deliver_to_known(post: Post, known: KnownIssue, box: KeyedBox) -> Delivered | Gone | Failure:
-    """Każda część jako komentarz do issue ``known.number``, jeśli skrzynka je ma (otwarte albo zamknięte).
+    """Komentarze wysyłki (``Post.opening``) do issue ``known.number``, jeśli skrzynka je ma (otwarte albo zamknięte).
+
+    Do ``KnownIssue`` to każda część, a do issue, które założyła wcześniejsza próba (``Opened``), części po jego treści.
 
     Komentarz do issue, które Maks usunął, to 404, czyli odmowa, która zatrzymałaby całą kolejkę, więc kolejka
     najpierw pyta o issue z etykietą. Gdy lista przyszła bez tego numeru, issue nie ma (``Gone``).
@@ -439,7 +528,7 @@ def _deliver_to_known(post: Post, known: KnownIssue, box: KeyedBox) -> Delivered
         return found
     if all(issue.number != known.number for issue in found):
         return Gone(known.number)
-    return _comment_all(known.number, post.parts, box)
+    return _comment_all(known.number, post.opening()[1], box)
 
 
 def _deliver_to_period(post: Post, thread: PeriodThread, box: KeyedBox) -> Delivered | Failure:
@@ -497,22 +586,25 @@ def _waiting(outcome: Failure) -> tuple[WaitingCause, Literal["stop", "next"]]:
 class Outbox:
     """Pliki kolejki w ``directory`` i jedyny wątek, który je wysyła, także sam po porażce skrzynki.
 
-    Każdy plik ma jednego autora (``post``, nowa nazwa) i jednego czytelnika, który go oznacza i usuwa (wątek
-    ``skrzynka-kolejka``), więc pliki nie potrzebują blokady. Blokada chroni tylko to, czy wątek już biegnie, i
-    adresy dostarczonych wysyłek; zbiory nazw plików i plik ``addresses`` zna tylko ten jeden wątek.
+    Każdy plik ma jednego autora (``post``, nowa nazwa) i jednego czytelnika naraz, który go oznacza i usuwa
+    (przejście wątku ``skrzynka-kolejka`` z blokadą folderu), więc same pliki nie potrzebują blokady. ``_lock`` chroni
+    tylko to, czy wątek już biegnie, i adresy dostarczonych wysyłek; zbiory nazw plików i plik ``addresses`` zna tylko
+    ten jeden wątek.
     ``on_delivered`` dostaje każdą wysyłkę przyjętą przez skrzynkę i numer jej issue, w wątku wysyłki, zanim plik
     dostanie znacznik. ``on_rejected`` dostaje każdą wysyłkę, której treść skrzynka odrzuciła, w wątku wysyłki, zanim
     przejście pójdzie dalej. ``prepare`` dostaje wysyłkę z pliku tuż przed wysłaniem i zwraca tę, która pójdzie, albo
     ``None``: wysyłka czeka na inną i zostaje w kolejce do następnego przejścia.
 
     Dwie kolejki jednego folderu w tym procesie nie wysyłają naraz (``_claimed``): kolejka, która zastanie przejście
-    drugiej, nie wysyła nic, a druga po swoim przejściu robi następne.
+    drugiej, nie wysyła nic, a druga po swoim przejściu robi następne. Kolejka, która zastanie blokadę folderu u kolejki
+    innego procesu (``_folder_lock``), też nie wysyła nic.
 
-    Przejście, które stanęło na przyczynie dla całej kolejki, nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba
-    że już jest nastawione; budzenie rusza wysyłkę w tle. Odrzucona treść i wysyłka czekająca w ``prepare`` budzenia
-    nie nastawiają: ponowienie im nie pomoże. Linia „skrzynka-czeka” trafia do dziennika tylko przy zmianie przyczyny
-    (zeruje ją każde dostarczenie i przejście do końca), bo budzenie co minutę zapełniłoby ostatnie wpisy, które niesie
-    Diagnoza.
+    Przejście, które stanęło na przyczynie dla całej kolejki, pominęło plik, którego nie dało się odczytać, albo
+    zastało blokadę folderu u innego procesu, nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba że już jest
+    nastawione; budzenie rusza wysyłkę w tle. Uszkodzona treść pliku, odrzucona treść i wysyłka czekająca w
+    ``prepare`` budzenia nie nastawiają: ponowienie im nie pomoże. Linia „skrzynka-czeka” trafia do dziennika tylko przy
+    zmianie przyczyny (zeruje ją każde dostarczenie i przejście do końca), bo budzenie co minutę zapełniłoby ostatnie
+    wpisy, które niesie Diagnoza.
     """
 
     def __init__(
@@ -542,6 +634,8 @@ class Outbox:
         self._again = False
         self._retry_armed = False
         self._stopped_on: WaitingCause | None = None  # tylko wątek kolejki
+        self._read_failed = False  # tylko wątek kolejki: ostatnie przejście pominęło plik, którego nie dało się odczytać
+        self._locked_out = False  # tylko wątek kolejki: ostatnie przejście zastało blokadę folderu u innego procesu
         self._first_comments: dict[tuple[str, Label], str | None] = {} if addresses is None else _read_addresses(addresses)
         self._undeleted: set[str] = set()  # wysłane w tej pracy Centrum, usunięcie się nie udało i jest w dzienniku
         self._unreadable: set[str] = set()  # nieczytelne, już w dzienniku tej pracy Centrum
@@ -551,10 +645,12 @@ class Outbox:
     def resume(self) -> None:
         """Przy starcie Centrum: usuwa pozostałości urwanego zapisu i wysyła w tle wszystko, co czeka.
 
-        Woła go ``lifespan`` przed przyjęciem pierwszego zapytania HTTP. Wysyłkę tworzy tylko zapytanie HTTP
-        (Uruchomienie albo „Wyślij” Uwagi taty), a wątek wysyłki rusza dopiero tutaj, więc żaden ``*.tmp`` nie ma
-        teraz autora: każdy został po zapisie przerwanym w poprzedniej pracy Centrum (np. utrata zasilania). Plik
-        ``.json`` obok niego, jeśli jest, ma pełną treść sprzed tego zapisu. Start nie czeka na skrzynkę: pyta ją tylko wątek w tle.
+        Woła go ``lifespan`` przed przyjęciem pierwszego zapytania HTTP, więc ``*.tmp`` nie ma autora w tej pracy
+        Centrum. Został po zapisie przerwanym w poprzedniej (np. utrata zasilania) albo pisze go jeszcze poprzednie
+        Centrum, które po zwolnieniu portu kończy otwarte zapytania do ``_GRACEFUL_SHUTDOWN_S`` (``server``) i swoje
+        przejście kolejki. Jego ``post`` zwraca wtedy ``False`` i zapytanie odmawia tacie (Uwaga taty, Zgłoszenie), a
+        znacznik dostarczenia się nie zapisuje, choć plik i tak znika w ``_remove``. Plik ``.json`` obok ``*.tmp``, jeśli
+        jest, ma pełną treść sprzed tego zapisu. Start nie czeka na skrzynkę: pyta ją tylko wątek w tle.
         """
 
         with suppress(OSError):
@@ -586,7 +682,8 @@ class Outbox:
     def wait_delivered(self, run_id: str, label: Label, *, timeout_s: float) -> bool:
         """Czeka najwyżej ``timeout_s``, aż skrzynka przyjmie wysyłkę ``label`` z ``run_id`` w tej pracy Centrum.
 
-        ``False`` od razu, gdy wątek wysyłki skończył przejście kolejki bez niej (brak klucza, sieci, odmowa).
+        ``False`` od razu, gdy wątek wysyłki skończył przejście kolejki bez niej (brak klucza, sieci, odmowa, blokada
+        folderu u innego procesu).
         """
 
         def settled() -> bool:
@@ -628,7 +725,10 @@ class Outbox:
             try:
                 if _claimed(self._directory):
                     try:
-                        self._send_all()
+                        with _folder_lock(self._directory) as mine:
+                            self._locked_out = not mine
+                            if mine:
+                                self._send_all()
                     finally:
                         if _released(self._directory):
                             with self._lock:
@@ -638,7 +738,7 @@ class Outbox:
             with self._changed:
                 if not self._again:
                     self._draining = False
-                    if self._stopped_on is not None and not self._retry_armed:
+                    if (self._stopped_on is not None or self._read_failed or self._locked_out) and not self._retry_armed:
                         self._retry_armed = True
                         self._clock.after(RETRY_S, self._woken)
                     self._changed.notify_all()
@@ -653,16 +753,22 @@ class Outbox:
     def _send_all(self) -> None:
         """Pliki kolejki po nazwie (czas utworzenia); porażka skrzynki zatrzymuje przejście albo pomija plik (``_waiting``).
 
-        ``_stopped_on`` to potem przyczyna, na której przejście stanęło, albo ``None``.
+        ``_stopped_on`` to potem przyczyna, na której przejście stanęło, albo ``None``, a ``_read_failed`` mówi, czy
+        przejście pominęło plik, którego nie dało się odczytać.
         """
 
+        self._read_failed = False
         for path in sorted(self._directory.glob("*.json")):
             if path.name in self._undeleted:
                 self._remove(path)
                 continue
             if path.name in self._rejected:
                 continue
-            queued = _queued(path)
+            try:
+                queued = _queued(path)
+            except OSError:
+                self._read_failed = True
+                queued = None
             if queued is None:
                 self._skip_unreadable(path)
                 continue
@@ -673,7 +779,13 @@ class Outbox:
             if post is None:
                 continue
             label, period = post.target.label, post.period
-            outcome = _deliver(post, self._box)
+            outcome = _deliver(post, self._box, queued.issue)
+            if isinstance(outcome, Opened):
+                # Bez numeru w pliku następny start założyłby drugie issue; chroni wtedy już tylko _rejected, do końca
+                # tej pracy Centrum.
+                with suppress(OSError):
+                    replace_atomically(path, _queue_text(post, delivered_parts=0, issue=outcome.number))
+                outcome = Rejected()
             if isinstance(outcome, Gone):
                 self._log.box_post_dropped(label=label, file=path.name, number=outcome.number)
                 self._remove(path)

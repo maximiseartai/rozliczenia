@@ -24,21 +24,12 @@
     "wynik": "przechodzi"
   },
   "dwa-procesy": {
-    "wynik": "narusza",
-    "obietnica": "JednoIssue",
-    "przyczyna": "dwa_procesy",
-    "znalezisko": "nowe Centrum startuje, gdy stare zamknęło port, a jego wątek kolejki jeszcze wysyła: oba nie znajdują issue okresu i oba je zakładają"
+    "wynik": "przechodzi"
   },
   "odczyt": {
-    "wynik": "narusza",
-    "obietnica": "Zbieganie",
-    "przyczyna": "odczyt",
-    "znalezisko": "plik kolejki, którego raz nie da się odczytać (_queued), przejście pomija bez budzenia za RETRY_S, więc czeka do następnej wysyłki albo startu"
+    "wynik": "przechodzi"
   },
   "odmowa-tresci": {
-    "wynik": "narusza",
-    "obietnica": "JednoIssue",
-    "przyczyna": "odmowa_po_zalozeniu",
-    "znalezisko": "Skrzynka odrzuca komentarz (Rejected) po założeniu issue Uwagi taty, a następny start zakłada drugie issue z tą samą Uwagą"
+    "wynik": "przechodzi"
   }
 }

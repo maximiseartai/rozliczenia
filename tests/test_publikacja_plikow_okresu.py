@@ -11,12 +11,20 @@ Zakres, znane ustalenia i postępowanie przy porażce opisuje
 from __future__ import annotations
 
 import importlib.util
+import os
+import stat
 import sys
 import threading
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+
+# Harmonogramy i różne stany każdego zakresu zmierzone na c5d8bb3d, te same na Pythonie 3.11, 3.12 i 3.14. Drzewo
+# mniejsze niż to gubi wybory kroków, a sprawdzenie dalej kończy się OK: sprzątanie po Zatrzymaniu bez wyboru kroku
+# daje w ``dwa-uruchomienia`` 4718 harmonogramów i przestaje łapać wycofanie, które usuwa plik taty. Granica schodzi
+# tylko ze zmianą modelu, która naprawdę zmniejsza drzewo.
+SMALLEST_TREE = {"jedno-uruchomienie": (377, 231), "dwa-uruchomienia": (9798, 7015)}
 
 EXPLORER = (
     Path(__file__).resolve().parents[1]
@@ -58,9 +66,20 @@ def test_publikacja_plikow_okresu_zachowuje_nienadpisywanie_i_razem_albo_zaden_w
     monkeypatch.setattr(explorer.preparation_files, "write_period_files", counted)
 
     assert explorer.probe_interception() == []
-    outcome = explorer.summarize([explorer.explore(scope) for scope in explorer.SCOPES.values()])
+    reports = [explorer.explore(scope) for scope in explorer.SCOPES.values()]
+    outcome = explorer.summarize(reports)
 
     assert outcome.exit_code == 0, "\n".join(outcome.lines)
+    smaller = {
+        report.scope.name: (report.schedules, report.states)
+        for report in reports
+        if report.schedules < SMALLEST_TREE[report.scope.name][0] or report.states < SMALLEST_TREE[report.scope.name][1]
+    }
+    assert smaller == {}, (
+        f"drzewo harmonogramów mniejsze niż {SMALLEST_TREE} na Pythonie {sys.version.split()[0]}: zgubiony wybór kroku"
+        " albo świadoma zmiana modelu, która zmniejsza drzewo; wtedy obniż SMALLEST_TREE"
+        " w tests/test_publikacja_plikow_okresu.py"
+    )
     # Drugie Uruchomienie procesu musi wejść między kroki pierwszego, inaczej zakres dwóch Uruchomień sprawdza tylko
     # jedno po drugim i OK niczego nie mówi o wyścigu.
     assert interleaved, "w żadnym harmonogramie drugie Uruchomienie procesu nie ruszyło przed końcem pierwszego"
@@ -129,3 +148,41 @@ def test_limit_czasu_w_kodzie_publikacji_konczy_sprawdzenie_tym_limitem(
 
     with pytest.raises(_LimitCzasu):
         explorer.explore(explorer.SCOPES["dwa-uruchomienia"])
+
+
+def _istnieje_przez_os_stat(path: Path) -> bool:
+    try:
+        path.stat()
+    except OSError:
+        return False
+    return True
+
+
+def _dowiazanie_przez_os_lstat(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def test_drzewo_harmonogramow_nie_zalezy_od_tego_czym_pathlib_pyta_o_plik(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Na każdej wersji Pythona sprawdzenie przechodzi te same harmonogramy.
+
+    Na Pythonie 3.11 i 3.12 `Path.exists` i `Path.is_symlink` pytają `Path.stat` i `Path.lstat`, a na 3.14
+    `os.path.exists` i `os.path.islink`, których odpowiedzi mówią mniej. Stan zapamiętywał odpowiedź, więc na 3.14
+    łączył stany, które 3.12 rozróżnia, i przechodził 6640 harmonogramów `dwa-uruchomienia` zamiast 9798.
+    """
+
+    explorer = _load_explorer()
+    trees = {}
+    for version, exists, is_symlink in (
+        ("3.11 i 3.12", _istnieje_przez_os_stat, _dowiazanie_przez_os_lstat),
+        # Przechwytywanie podmienia os.path.exists i os.path.islink, więc szukamy ich w chwili wywołania.
+        ("3.14", lambda path: os.path.exists(path), lambda path: os.path.islink(path)),
+    ):
+        monkeypatch.setattr(Path, "exists", lambda path, exists=exists, **_: exists(path))
+        monkeypatch.setattr(Path, "is_symlink", lambda path, is_symlink=is_symlink: is_symlink(path))
+        report = explorer.explore(explorer.SCOPES["jedno-uruchomienie"])
+        trees[version] = (report.schedules, report.states)
+
+    assert trees["3.11 i 3.12"] == trees["3.14"], trees

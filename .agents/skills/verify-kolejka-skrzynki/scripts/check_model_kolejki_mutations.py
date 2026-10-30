@@ -2,7 +2,7 @@
 
 Each mutation removes from ``model/KolejkaSkrzynki.tla`` one guard or step whose counterpart in
 ``src/rozliczenia/centrum/outbox.py`` the mutation names, runs on its own copy of the checkout (``tools/mutacje.py``)
-and must end TLC's report with the expected line. Two mutations fix a known finding in the model and must end with
+and must end TLC's report with the expected line. One mutation fixes a known finding in the model and must end with
 ``ZNALEZISKO ZNIKNĘŁO``. A mutation whose anchor text is no longer in the model is reported as NIEAKTUALNA: update
 it to the new model.
 
@@ -50,10 +50,27 @@ MUTATIONS = (
         NEW,
     ),
     Mutation(
-        "_claimed zawsze pozwala wysyłać",
-        (Edit(MODEL, '    /\\ IF passes[Proc(q)] = "wolny"\n', "    /\\ IF TRUE\n"),),
+        "_claimed zawsze pozwala wysyłać, a blokada folderu jest zawsze wolna (_drain bez _claimed i _folder_lock)",
+        (
+            Edit(MODEL, '    /\\ IF passes[Proc(q)] = "wolny"\n', "    /\\ IF TRUE\n"),
+            Edit(MODEL, "            /\\ IF blokada = 0\n", "            /\\ IF TRUE\n"),
+        ),
         _check("dwie-kolejki"),
         "dwie kolejki jednego folderu wysyłają naraz i zakładają dwa issue okresu",
+        NEW,
+    ),
+    Mutation(
+        "przejście bez blokady folderu (_drain bez _folder_lock)",
+        (Edit(MODEL, "            /\\ IF blokada = 0\n", "            /\\ IF TRUE\n"),),
+        _check("dwa-procesy"),
+        "stare Centrum po zwolnieniu portu i nowe wysyłają z jednego folderu naraz i zakładają dwa issue okresu",
+        NEW,
+    ),
+    Mutation(
+        "blokada u innego procesu nie nastawia budzenia RETRY_S (_drain: _locked_out)",
+        (Edit(MODEL, "armed[q] \\/ stopped[q] \\/ nieczytany[q] \\/ bezBlokady[q])\n", "armed[q] \\/ stopped[q] \\/ nieczytany[q])\n"),),
+        _check("dwa-procesy"),
+        "Kontrola ilości, której wysyłkę przerwał koniec starego Centrum, czeka w kolejce nowego do następnej wysyłki",
         NEW,
     ),
     Mutation(
@@ -92,7 +109,7 @@ MUTATIONS = (
                 MODEL,
                 '          /\\ Stop(q, "comment: Unreachable przed skutkiem, przejscie staje")\n'
                 "          /\\ UNCHANGED <<issues, kom, rejected, zgubione, odmowy, odrzucone>>\n",
-                "          /\\ kom' = Ustaw(kom, q, Tail(kom[q])) /\\ UNCHANGED stopped\n"
+                "          /\\ kom' = Ustaw(kom, q, Tail(kom[q])) /\\ UNCHANGED <<stopped, nieczytany>>\n"
                 '          /\\ Idz(q, IF Tail(kom[q]) = <<>> THEN "dostarczona" ELSE "komentuj", "comment: pominiety")\n'
                 "          /\\ UNCHANGED <<issues, rejected, zgubione, odmowy, odrzucone>>\n",
             ),
@@ -120,22 +137,41 @@ MUTATIONS = (
         (
             Edit(
                 MODEL,
-                '          /\\ Odrzuc(q, w, "comment: Rejected, plik czeka do nastepnego startu")\n'
-                "          /\\ UNCHANGED <<issues, kom, stopped, sieci, zgubione>>\n",
+                '          /\\ IF Cel = "nowe" /\\ numer[w] = 0\n'
+                "             THEN /\\ UNCHANGED rejected\n"
+                '                  /\\ Idz(q, "zapisz_numer", "comment: Rejected po open_issue, Opened: plik zapamieta numer issue")\n'
+                '             ELSE Odrzuc(q, w, "comment: Rejected, plik czeka do nastepnego startu")\n'
+                "          /\\ UNCHANGED <<issues, kom, stopped, nieczytany, sieci, zgubione, slady>>\n",
                 '          /\\ Idz(q, "usun", "comment: Rejected, _remove")\n'
-                "          /\\ UNCHANGED <<issues, kom, stopped, rejected, sieci, zgubione>>\n",
+                "          /\\ UNCHANGED <<issues, kom, stopped, nieczytany, rejected, sieci, zgubione, slady>>\n",
             ),
         ),
         _check("odmowa-tresci"),
-        "Uwaga taty, której komentarz Skrzynka odrzuciła, znika z kolejki bez części 2, choć jej znalezisko wybacza tylko drugie issue",
+        "Uwaga taty, której komentarz Skrzynka odrzuciła, znika z kolejki bez części 2",
+        NEW,
+    ),
+    Mutation(
+        "odrzucony komentarz po założeniu issue Uwagi nie zapisuje numeru (_send_all: replace_atomically po Opened)",
+        (Edit(MODEL, '          /\\ IF Cel = "nowe" /\\ numer[w] = 0\n             THEN /\\ UNCHANGED rejected\n',
+              "          /\\ IF FALSE\n             THEN /\\ UNCHANGED rejected\n"),),
+        _check("odmowa-tresci"),
+        "następny start zakłada drugie issue z tą samą Uwagą taty",
+        NEW,
+    ),
+    Mutation(
+        "plik z numerem issue zakłada nowe issue (_deliver: if opened is not None)",
+        (Edit(MODEL, '                         /\\ IF Cel = "nowe" /\\ numer[w] = 0\n',
+              '                         /\\ IF Cel = "nowe"\n'),),
+        _check("odmowa-tresci"),
+        "Uwaga taty, której plik zapamiętał numer issue, dostaje przy następnym starcie drugie issue",
         NEW,
     ),
     Mutation(
         "nieczytelny plik kolejki usunięty zamiast pominięty (_skip_unreadable: _remove)",
-        (Edit(MODEL, '/\\ Idz(q, "plik", "_queued: read_text rzuca OSError, _skip_unreadable pomija plik")\n',
+        (Edit(MODEL, '/\\ Idz(q, "plik", "_queued: read_text rzuca OSError, _read_failed, _skip_unreadable pomija plik")\n',
               '/\\ Idz(q, "usun", "_queued: read_text rzuca OSError, _remove")\n'),),
         _check("odczyt"),
-        "Kontrola ilości, której pliku raz nie dało się odczytać, znika bez wysyłki, choć jej znalezisko wybacza tylko Zbieganie",
+        "Kontrola ilości, której pliku raz nie dało się odczytać, znika bez wysyłki",
         NEW,
     ),
     Mutation(
@@ -153,16 +189,16 @@ MUTATIONS = (
                 MODEL,
                 '          /\\ Stop(q, "labelled_issues: Unreachable (brak sieci), przejscie staje")\n',
                 '          /\\ Odrzuc(q, biez[q], "labelled_issues: Unreachable, plik do nastepnego startu")\n'
-                "          /\\ UNCHANGED stopped\n",
+                "          /\\ UNCHANGED <<stopped, nieczytany>>\n",
             ),
             Edit(
                 MODEL,
                 "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, undeleted, rejected, lista, biez, "
-                "bezZnacznika, bezOchrony,\n                   passes, zamkniecia, nadawanie, zgubione, odmowy, "
-                "bledyPliku, wylaczenia>>\n",
+                "bezZnacznika, bezOchrony,\n                   passes, blokada, bezBlokady, zamkniecia, nadawanie, zgubione, "
+                "odmowy, bledyPliku, wylaczenia>>\n",
                 "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, undeleted, lista, biez, "
-                "bezZnacznika, bezOchrony,\n                   passes, zamkniecia, nadawanie, zgubione, odmowy, "
-                "bledyPliku, wylaczenia>>\n"
+                "bezZnacznika, bezOchrony,\n                   passes, blokada, bezBlokady, zamkniecia, nadawanie, zgubione, "
+                "odmowy, bledyPliku, wylaczenia>>\n"
                 '    /\\ pc\'[q] = "plik" \\/ UNCHANGED rejected\n',
             ),
         ),
@@ -172,18 +208,25 @@ MUTATIONS = (
     ),
     Mutation(
         "przejście, które stanęło, nie zapisuje _stopped_on",
-        (Edit(MODEL, "    /\\ stopped' = Ustaw(stopped, q, TRUE)\n    /\\ Idz(q, \"zwolnij\", opis)\n",
-              "    /\\ UNCHANGED stopped\n    /\\ Idz(q, \"zwolnij\", opis)\n"),),
+        (Edit(MODEL, "    /\\ stopped' = Ustaw(stopped, q, TRUE)\n    /\\ UNCHANGED nieczytany\n",
+              "    /\\ UNCHANGED <<stopped, nieczytany>>\n"),),
         _check("okres"),
         "po braku sieci nic nie nastawia budzenia i wysyłka czeka do następnego startu",
         NEW,
     ),
     Mutation(
         "brak budzenia RETRY_S (_drain: clock.after)",
-        (Edit(MODEL, "            /\\ armed' = Ustaw(armed, q, armed[q] \\/ stopped[q])\n",
+        (Edit(MODEL, "            /\\ armed' = Ustaw(armed, q, armed[q] \\/ stopped[q] \\/ nieczytany[q] \\/ bezBlokady[q])\n",
               "            /\\ UNCHANGED armed\n"),),
         _check("okres"),
         "po braku sieci wysyłka czeka do następnego startu albo następnej wysyłki",
+        NEW,
+    ),
+    Mutation(
+        "nieczytelny plik nie nastawia budzenia RETRY_S (_drain: _read_failed)",
+        (Edit(MODEL, "armed[q] \\/ stopped[q] \\/ nieczytany[q] \\/ bezBlokady[q])\n", "armed[q] \\/ stopped[q] \\/ bezBlokady[q])\n"),),
+        _check("odczyt"),
+        "Kontrola ilości, której pliku raz nie dało się odczytać, czeka do następnej wysyłki albo startu, choć sieć działa",
         NEW,
     ),
     Mutation(
@@ -223,6 +266,27 @@ MUTATIONS = (
         NEW,
     ),
     Mutation(
+        "post zwraca True mimo OSError z os.replace (post: except OSError: return False)",
+        (Edit(MODEL, "                /\\ UNCHANGED zakolejkowane\n"
+              "                /\\ krok' = \"post: os.replace rzuca OSError, post zwraca False\"",
+              "                /\\ zakolejkowane' = zakolejkowane \\cup {w}\n"
+              "                /\\ krok' = \"post: os.replace rzuca OSError, post zwraca False\""),),
+        _check("okres"),
+        "Kontrola ilości, której pliku kolejki nie dało się zapisać, uchodzi za przyjętą i nie dociera do Skrzynki",
+        NEW,
+    ),
+    Mutation(
+        "post zwraca True, choć pliku .json.tmp już nie ma (post: except OSError: return False)",
+        (Edit(MODEL, "                /\\ UNCHANGED <<zakolejkowane, bledyPliku>>\n"
+              "                /\\ krok' = \"post: pliku .json.tmp",
+              "                /\\ zakolejkowane' = zakolejkowane \\cup {w}\n"
+              "                /\\ UNCHANGED bledyPliku\n"
+              "                /\\ krok' = \"post: pliku .json.tmp"),),
+        _check("dwa-procesy"),
+        "Kontrola ilości, której plik .json.tmp usunął resume nowego Centrum, uchodzi za przyjętą i nie dociera do Skrzynki",
+        NEW,
+    ),
+    Mutation(
         "naprawa w modelu: przejęte Zgłoszenie dostaje resztę części",
         (
             Edit(
@@ -237,14 +301,6 @@ MUTATIONS = (
         ),
         _check("zgloszenie-w-czesciach"),
         "znane znalezisko „przejecie” znika, a sprawdzenie to mówi",
-        GONE,
-    ),
-    Mutation(
-        "naprawa w modelu: nowe Centrum czeka, aż stary proces się skończy",
-        (Edit(MODEL, "    /\\ IF DwaProcesy \\/ q = 1 THEN MaPort = {} ELSE zyje[1] = \"tak\"\n",
-              "    /\\ IF DwaProcesy \\/ q = 1 THEN \\A r \\in Q : zyje[r] = \"nie\" ELSE zyje[1] = \"tak\"\n"),),
-        _check("dwa-procesy"),
-        "znane znalezisko „dwa_procesy” znika, a sprawdzenie to mówi",
         GONE,
     ),
 )

@@ -63,8 +63,8 @@ MUTATIONS = (
         (
             Edit(
                 VERIFIED,
-                "    return _comment_all(known.number, post.parts, box)\n",
-                "    return _comment_all(known.number, post.parts[1:], box)\n",
+                "    return _comment_all(known.number, post.opening()[1], box)\n",
+                "    return _comment_all(known.number, post.opening()[1][1:], box)\n",
             ),
         ),
         (EXPLORER, "--scope", "znane-issue"),
@@ -128,7 +128,7 @@ MUTATIONS = (
         (
             Edit(
                 VERIFIED,
-                "                    if self._stopped_on is not None and not self._retry_armed:\n",
+                "                    if (self._stopped_on is not None or self._read_failed or self._locked_out) and not self._retry_armed:\n",
                 "                    if False:\n",
             ),
         ),
