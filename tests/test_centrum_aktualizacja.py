@@ -95,10 +95,14 @@ def update_until_result(centrum: PreparingCentrum) -> dict[str, Any]:
 
 
 def tool_update_until(centrum: PreparingCentrum, reached: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
+    """Czeka na widok karty, który spełnia ``reached``; przy kroku „restarting” także na zamknięcie Centrum."""
+
     deadline = time.monotonic() + UPDATE_WAIT_S
     while True:
         view = dict(centrum.client.get("/api/tool-update").json())
         if reached(view):
+            if view.get("step") == "restarting":
+                centrum.closed_for_update()
             return view
         assert time.monotonic() < deadline, f"Aktualizacja narzędzia utknęła w {view}."
         time.sleep(0.02)

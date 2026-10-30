@@ -39,6 +39,7 @@ from tests.fixtures.centrum import (
     FakeReportBox,
     QUEUE_THREAD,
     RUN_LOGS_IN_BACKGROUND,
+    UPDATE_THREAD,
     MetricsPaths,
     finished_view,
     join_threads_since,
@@ -258,6 +259,15 @@ class PreparingCentrum:
     def metric_records(self) -> list[dict[str, Any]]:
         text = self.metrics_path.read_text(encoding="utf-8")
         return [json.loads(line) for line in text.splitlines()]
+
+    def closed_for_update(self) -> None:
+        """Czeka, aż Centrum, którego karta jest w kroku „restarting”, uruchomi opiekuna ponownego startu i się zamknie.
+
+        Karta widzi ten krok, zanim wątek Aktualizacji narzędzia wywoła opiekuna (``Surroundings.restarts``) i zapisze
+        ``zamkniecie`` w dzienniku, więc test, który czyta je zaraz po tym kroku, ściga się z tym wątkiem.
+        """
+
+        join_threads_since(self.client.since, named=UPDATE_THREAD)
 
     def restart(self) -> None:
         """Nowe Centrum na tych samych plikach i Ustawieniach taty, gdy skończy się przejście kolejki poprzedniego.

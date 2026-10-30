@@ -127,6 +127,8 @@ def _update_until(centrum: PreparingCentrum, reached: Callable[[dict[str, Any]],
     while True:
         view = dict(centrum.client.get("/api/tool-update").json())
         if reached(view):
+            if view.get("step") == "restarting":
+                centrum.closed_for_update()
             return view
         assert time.monotonic() < deadline, f"Aktualizacja narzędzia utknęła w {view}."
         time.sleep(0.02)
