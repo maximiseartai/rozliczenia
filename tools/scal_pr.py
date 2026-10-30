@@ -5,7 +5,8 @@ Narzędzie scala PR numer N do jego bazy, gdy jednocześnie:
 1. PR jest otwarty, nie jest szkicem i nie pochodzi z forka (z forka ruff i mypy biegłyby na obcym kodzie);
 2. check ``Required CI status`` z GitHub Actions na HEAD PR skończył się sukcesem (jak w rulesecie ``main``:
    CheckRun z workflow, nie status commitu, który może ustawić każdy z prawem zapisu);
-3. najnowszy werdykt dla HEAD PR to ``PASS``;
+3. najnowszy werdykt dla HEAD PR to ``PASS``, a autor odpowiedział na każde znalezisko ostatniego werdyktu
+   ``FAIL`` (niżej);
 4. opis PR ma każdy nagłówek ``##`` wzoru z ``.agents/skills/pr/SKILL.md``, każdy jako osobną linię i w kolejności
    wzoru, więc każdy PR ma te same sekcje, a sekcja dopisana do wzoru od razu obowiązuje;
 5. HEAD PR scala się z bieżącą bazą z ``origin`` bez konfliktu, a ruff i mypy dla obu systemów przechodzą na
@@ -24,6 +25,17 @@ nie znalazł problemów, a skille ``verify-*`` z linii ``SKILLE VERIFY`` ``tools
 tym SHA (ich polecenia z linii ``LICZY CI`` w CI, reszta workflow u agenta). Rozstrzyga najnowszy werdykt dla HEAD:
 sprzeciw po ``PASS`` odbiera zgodę, nowszy ``PASS`` ją przywraca, a werdykt starszego commitu nie przechodzi na nowy
 push. Komentarz edytowany liczy się z treścią po edycji, ale w miejscu utworzenia, a ukryty komentarz nadal się liczy.
+
+Znalezisko werdyktu to jego linia po dwóch pierwszych, która zaczyna się od oznaczenia: ``W<n>: `` dla Ważnego
+i ``D<n>: `` dla Drobnego, numerowanych od 1 w swoim rodzaju, z ``- `` przed nim albo bez. Po werdykcie ``FAIL``
+autor odpowiada komentarzem albo recenzją, której pierwsza niepusta linia to ``ODPOWIEDŹ <SHA>`` z pełnym SHA
+z linii tego werdyktu, a każda dalsza linia ``W1: naprawione — <powód>`` odpowiada na jedno znalezisko (``- `` przed
+nią wolno): po oznaczeniu stoi ``naprawione``, ``błędne``, ``zamierzone`` albo ``bez znaczenia``, a po pauzie ``—``
+niepusty powód. Liczą się odpowiedzi kont z prawem zapisu nowsze niż ostatni werdykt ``WERDYKT: FAIL`` PR (dla
+dowolnego commitu), także z kilku komentarzy, a dla tego samego znaleziska rozstrzyga najnowsza. Linia w innej
+postaci nie jest odpowiedzią. Scalenie odmawia, gdy któreś znalezisko ostatniego ``FAIL`` nie ma odpowiedzi, i
+podaje ich oznaczenia. Recenzja ``CHANGES_REQUESTED`` bez linii werdyktu nie zastępuje ostatniego ``FAIL``,
+a ``FAIL`` bez oznaczeń nie ma znalezisk, więc nie wymaga odpowiedzi.
 
 Gdy któryś warunek nie zachodzi, narzędzie nie scala i kończy się linią ``SCAL ODMOWA | #N <sha> | <przyczyny>``.
 Warunki 1–4 sprawdza razem i podaje wszystkie przyczyny; warunek 5 trwa dłużej, więc biegnie dopiero po nich.
@@ -84,13 +96,14 @@ Dwa tryby służą recenzentowi (skill ``przeglad``, tryb recenzenta) i niczego 
 kontekst przeglądu: pełny SHA HEAD PR, bazę i merge-base z nią, ``git diff --stat`` i zmienione pliki od merge-base,
 wynik ``tools/skille_dla_zmiany.py`` z HEAD PR liczony od merge-base (w kopii commitu HEAD, więc ``pilnuje:`` skilli
 jest z PR) i poprzednie werdykty PR w kolejności utworzenia, każdy z datą, autorem, dwiema pierwszymi liniami i tym,
-czy dotyczy HEAD. Gdy ostatni werdykt jest dla innego commitu, linia ``RUNDA`` podaje polecenie diffu od niego do
-HEAD. Kończy się linią ``PRZEGLĄD OK | #N <sha>``.
+czy dotyczy HEAD, a po nich znaleziska ostatniego werdyktu ``FAIL``, każde w linii ``ODPOWIEDŹ | <znalezisko> |
+<odpowiedź autora albo brak>``. Gdy ostatni werdykt jest dla innego commitu, linia ``RUNDA`` podaje polecenie diffu
+od niego do HEAD. Kończy się linią ``PRZEGLĄD OK | #N <sha>``.
 
 ``--werdykt <plik>`` publikuje plik jako komentarz PR (``gh pr comment --body-file``), gdy pierwsza niepusta linia
 to ``WERDYKT: PASS <SHA>`` albo ``WERDYKT: FAIL <SHA>`` z pełnym SHA bieżącego HEAD PR, druga to ``Znaleziska: N
-(Ważne a, Drobne b)`` z ``N = a + b``, ``PASS`` ma zero Ważnych, ``FAIL`` co najmniej jedno, a Drobnych jest
-najwyżej trzy. Inaczej niczego nie publikuje i kończy się linią ``WERDYKT ODMOWA | #N | <przyczyny>``, w której
+(Ważne a, Drobne b)`` z ``N = a + b``, ``PASS`` ma zero Ważnych, ``FAIL`` co najmniej jedno, Drobnych jest
+najwyżej trzy, a oznaczenia znalezisk to dokładnie ``W1`` do ``Wa`` i ``D1`` do ``Db``, każde raz. Inaczej niczego nie publikuje i kończy się linią ``WERDYKT ODMOWA | #N | <przyczyny>``, w której
 każda przyczyna mówi, co poprawić w pliku. Opublikowany werdykt kończy się linią ``WERDYKT OK | #N <sha> | <PASS
 albo FAIL> | <adres komentarza>``.
 
@@ -119,6 +132,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_CHECK = "Required CI status"
 VERDICT_LINE = re.compile(r"WERDYKT: (PASS|FAIL) ([0-9a-f]{40})")
 FINDINGS_LINE = re.compile(r"Znaleziska: (\d+) \(Ważne (\d+), Drobne (\d+)\)")
+FINDING = re.compile(r"(?:- )?([WD][1-9]\d*): (\S.*)")
+ANSWER = re.compile(r"(?:- )?([WD][1-9]\d*): ((?:naprawione|błędne|zamierzone|bez znaczenia) — \S.*)")
 MAX_MINOR = 3
 SKILLS_FOR_CHANGE = Path("tools") / "skille_dla_zmiany.py"
 SKILLS_TIMEOUT_S = 300
@@ -197,10 +212,16 @@ def _body_problem(body: str) -> str | None:
     return f"opis: brak {', '.join(f'„{heading}”' for heading in missing)} w kolejności wzoru {TEMPLATE.relative_to(ROOT).as_posix()}"
 
 
+def _trusted(verdict: dict[str, object]) -> bool:
+    """Komentarz albo opublikowana recenzja konta z prawem zapisu."""
+
+    return verdict["authorAssociation"] in TRUSTED and verdict.get("state") != "PENDING"
+
+
 def _verdict(verdict: dict[str, object], head: str) -> str | None:
     """``PASS`` albo ``FAIL`` dla ``head``; ``None``, gdy komentarz albo recenzja nie jest werdyktem dla ``head``."""
 
-    if verdict["authorAssociation"] not in TRUSTED or verdict.get("state") == "PENDING":
+    if not _trusted(verdict):
         return None
     if verdict.get("state") == "CHANGES_REQUESTED":
         return "FAIL"
@@ -224,6 +245,48 @@ def _verdict_problem(verdicts: tuple[dict[str, object], ...], head: str) -> str 
     if latest is None:
         return f"werdykt: brak komentarza ani recenzji „WERDYKT: PASS {head}”"
     return None if latest == "PASS" else f"werdykt: FAIL dla {head[:7]} bez nowszego „WERDYKT: PASS {head}”"
+
+
+def _findings(lines: list[str]) -> dict[str, str]:
+    """Znaleziska werdyktu o liniach ``lines``: oznaczenie (``W1``, ``D1``) i jego linia bez ``- ``."""
+
+    return {found[1]: f"{found[1]}: {found[2]}" for line in lines[2:] if (found := FINDING.fullmatch(line))}
+
+
+@dataclass(frozen=True)
+class _Failed:
+    """Ostatni werdykt ``FAIL``: SHA z jego linii, znaleziska i odpowiedzi autora na nie (oznaczenie i odpowiedź)."""
+
+    reviewed: str
+    findings: dict[str, str]
+    answers: dict[str, str]
+
+
+def _last_failed(verdicts: tuple[dict[str, object], ...]) -> _Failed | None:
+    """Ostatni werdykt ``WERDYKT: FAIL`` z werdyktów w kolejności utworzenia i nowsze odpowiedzi na niego."""
+
+    failed = None
+    for verdict in filter(_trusted, verdicts):
+        lines = _text_lines(verdict["body"])
+        first = lines[0] if lines else ""
+        if (found := VERDICT_LINE.fullmatch(first)) and found[1] == "FAIL":
+            failed = _Failed(found[2], _findings(lines), {})
+        elif failed is not None and first == f"ODPOWIEDŹ {failed.reviewed}":
+            failed.answers.update({answer[1]: answer[2] for line in lines[1:] if (answer := ANSWER.fullmatch(line))})
+    return failed
+
+
+def _answers_problem(verdicts: tuple[dict[str, object], ...]) -> str | None:
+    """Przyczyna odmowy, gdy któreś znalezisko ostatniego werdyktu ``FAIL`` nie ma odpowiedzi autora."""
+
+    failed = _last_failed(verdicts)
+    missing = [label for label in failed.findings if label not in failed.answers] if failed else []
+    if failed is None or not missing:
+        return None
+    return (
+        f"odpowiedzi: brak na {', '.join(missing)} z werdyktu FAIL dla {failed.reviewed[:7]}; odpowiedz komentarzem "
+        f"„ODPOWIEDŹ {failed.reviewed}” z linią „<znalezisko>: naprawione|błędne|zamierzone|bez znaczenia — <powód>” na każde"
+    )
 
 
 @dataclass(frozen=True)
@@ -366,7 +429,7 @@ def _check(pull: Pull) -> str:
 
     checked = scalenia_pr.PullRequest(pull.number, pull.title, pull.head)
     base = scalenia_pr.fetch(pull.base, [checked])
-    problems = [*pull.problems, *filter(None, [_verdict_problem(pull.verdicts, pull.head)])]
+    problems = [*pull.problems, *filter(None, [_verdict_problem(pull.verdicts, pull.head), _answers_problem(pull.verdicts)])]
     if problems:
         raise _Refused("; ".join(problems))
     where = f"{pull.base} {base[:7]}"
@@ -462,12 +525,10 @@ def _skills_for_change(head: str, fork: str) -> list[str]:
 
 
 def _verdict_history(pull: Pull) -> list[str]:
-    """Linie werdyktów PR w kolejności utworzenia i linia ``RUNDA`` o ostatnim z nich."""
+    """Linie werdyktów PR w kolejności utworzenia, odpowiedzi na ostatni ``FAIL`` i linia ``RUNDA`` o ostatnim werdykcie."""
 
     shown, last, failed = [], None, set()
-    for verdict in pull.verdicts:
-        if verdict["authorAssociation"] not in TRUSTED or verdict.get("state") == "PENDING":
-            continue
+    for verdict in filter(_trusted, pull.verdicts):
         lines = _text_lines(verdict["body"])
         found = VERDICT_LINE.fullmatch(lines[0]) if lines else None
         if found is None and verdict.get("state") != "CHANGES_REQUESTED":
@@ -483,6 +544,8 @@ def _verdict_history(pull: Pull) -> list[str]:
             failed.add(found[2])
         which = "HEAD" if found[2] == pull.head else "inny commit"
         shown.append(f"WERDYKT | {when} {login} | {which} | {' | '.join(lines[:2])}")
+    if (answered := _last_failed(pull.verdicts)) is not None:
+        shown += [f"ODPOWIEDŹ | {finding} | {answered.answers.get(label, 'brak')}" for label, finding in answered.findings.items()]
     if last is None:
         return [*shown, "RUNDA | 1: PR nie ma werdyktu"]
     rounds = f"rund z FAIL: {len(failed)}, ostatni werdykt {last[0]} dla {last[1][:7]}"
@@ -527,6 +590,15 @@ def _verdict_file_problems(text: str, head: str) -> list[str]:
         problems.append(f"Drobne {minor}: podaj najwyżej {MAX_MINOR}, najważniejsze")
     if verdict is not None and (verdict[1] == "FAIL") != (major > 0):
         problems.append(f"{verdict[1]} z Ważne {major}: FAIL daje tylko Ważne znalezisko, a PASS jest bez Ważnych")
+    labels = [found[1] for line in lines[2:] if (found := FINDING.fullmatch(line))]
+    for kind, letter, count in (("Ważne", "W", major), ("Drobne", "D", minor)):
+        marked = sorted((label for label in labels if label[0] == letter), key=lambda label: int(label[1:]))
+        expected = [f"{letter}{number}" for number in range(1, count + 1)]
+        if marked != expected:
+            problems.append(
+                f"{kind} {count}, a oznaczenia {', '.join(marked) or 'brak'} zamiast {', '.join(expected) or 'żadnych'}: "
+                f"znalezisko zaczyna linię od „{letter}<n>: ”, kolejno od {letter}1"
+            )
     return problems
 
 

@@ -850,6 +850,116 @@ def test_gotowy_pr_nie_czeka_na_mutacje_zmiany_ani_linie_mutacja_bo_mutacje_bieg
     assert _last_line(answered).startswith(f"SCAL OK | #1 {head[:7]} | gotowy do merge'a")
 
 
+FAIL_WITH_FINDINGS = "WERDYKT: FAIL {old}\nZnaleziska: 2 (Ważne 1, Drobne 1)\n- W1: kod/inne.py:1 — brak testu\n- D1: kod/inne.py:1 — nazwa"
+MISSING = (
+    "odpowiedzi: brak na {missing} z werdyktu FAIL dla {short}; odpowiedz komentarzem „ODPOWIEDŹ {old}” "
+    "z linią „<znalezisko>: naprawione|błędne|zamierzone|bez znaczenia — <powód>” na każde"
+)
+
+
+@pytest.mark.parametrize(
+    ("replies", "missing"),
+    [
+        ([], "W1, D1"),
+        ([("comment", "ODPOWIEDŹ {old}\n- W1: naprawione — test w {head7}")], "D1"),
+        ([("comment", "ODPOWIEDŹ {head}\nW1: naprawione — test\nD1: bez znaczenia — nazwa z GLOSSARY.md")], "W1, D1"),
+        ([("comment", "ODPOWIEDŹ {old7}\nW1: naprawione — test\nD1: zamierzone — nazwa z GLOSSARY.md")], "W1, D1"),
+        ([("comment", "Odpowiedź {old}\nW1: naprawione — test\nD1: zamierzone — nazwa z GLOSSARY.md")], "W1, D1"),
+        ([("comment", "Poprawione.\nODPOWIEDŹ {old}\nW1: naprawione — test\nD1: zamierzone — nazwa")], "W1, D1"),
+        ([("comment", "ODPOWIEDŹ {old}\nW1: poprawione — test\nD1: zamierzone — nazwa")], "W1"),
+        ([("comment", "ODPOWIEDŹ {old}\nW1: naprawione\nD1: zamierzone — nazwa")], "W1"),
+        ([("comment", "ODPOWIEDŹ {old}\nW1: naprawione - test\nD1: zamierzone — nazwa")], "W1"),
+        ([("comment", "ODPOWIEDŹ {old}\nW1: naprawione — \nD1: zamierzone — nazwa")], "W1"),
+        ([("comment", "ODPOWIEDŹ {old}\nW1: naprawione — test\nD1: zamierzone — nazwa", "NONE")], "W1, D1"),
+        ([("PENDING", "ODPOWIEDŹ {old}\nW1: naprawione — test\nD1: zamierzone — nazwa")], "W1, D1"),
+        (
+            [("comment", "ODPOWIEDŹ {old}\nW1: naprawione — test\nD1: zamierzone — nazwa"), ("comment", "WERDYKT: FAIL {old}\nZnaleziska: 1 (Ważne 1, Drobne 0)\nW1: kod/inne.py:1 — brak typu")],
+            "W1",
+        ),
+        ([("comment", "ODPOWIEDŹ {old}\nW1: naprawione — test"), ("CHANGES_REQUESTED", "Popraw.")], "D1"),
+    ],
+    ids=[
+        "bez-odpowiedzi",
+        "odpowiedz-na-czesc",
+        "odpowiedz-dla-sha-head-a-nie-werdyktu",
+        "odpowiedz-ze-skroconym-sha",
+        "naglowek-malymi-literami",
+        "naglowek-nie-w-pierwszej-linii",
+        "nieznany-rodzaj-odpowiedzi",
+        "odpowiedz-bez-powodu",
+        "odpowiedz-z-lacznikiem-zamiast-pauzy",
+        "odpowiedz-z-pustym-powodem",
+        "odpowiedz-konta-bez-prawa-zapisu",
+        "odpowiedz-w-nieopublikowanej-recenzji",
+        "odpowiedz-sprzed-ostatniego-fail",
+        "prosba-o-zmiany-nie-zastepuje-fail-ze-znaleziskami",
+    ],
+)
+def test_znalezisko_ostatniego_fail_bez_odpowiedzi_autora_blokuje_merge_mimo_pass_dla_head(
+    tmp_path: Path, replies: list[tuple[str, ...]], missing: str
+) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM})
+    old = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
+    github.comment(1, FAIL_WITH_FINDINGS.format(old=old))
+    head = github.push_pull(1, {"kod/inne.py": "INNE: int = 2\n"})
+    for kind, body, *association in replies:
+        text = body.format(old=old, old7=old[:7], head=head, head7=head[:7])
+        github.comment(1, text, *association) if kind == "comment" else github.review(1, text, *association, state=kind)
+    github.comment(1, f"WERDYKT: PASS {head}\nZnaleziska: 0 (Ważne 0, Drobne 0)")
+
+    answered = github.run("1")
+
+    assert answered.returncode == 1, answered.stdout + answered.stderr
+    assert _last_line(answered) == f"SCAL ODMOWA | #1 {head[:7]} | {MISSING.format(missing=missing, short=old[:7], old=old)}"
+    assert github.merges() == []
+
+
+@pytest.mark.parametrize(
+    "replies",
+    [
+        [("comment", "ODPOWIEDŹ {old}\n- W1: naprawione — test w {head7}\n- D1: zamierzone — nazwa z GLOSSARY.md")],
+        [("comment", "\n  ODPOWIEDŹ {old}  \r\n\r\n  W1: błędne — kod/inne.py:1 ma test  \r\nD1: bez znaczenia — nazwa\r\n")],
+        [("comment", "ODPOWIEDŹ {old}\nW1: naprawione — test"), ("COMMENTED", "ODPOWIEDŹ {old}\nD1: zamierzone — nazwa")],
+        [("comment", "ODPOWIEDŹ {old}\nW1: naprawione — test\nD1: zamierzone — nazwa\nW7: naprawione — nie ma takiego")],
+        [("comment", "WERDYKT: FAIL {old}\nZnaleziska: 1 (Ważne 1, Drobne 0)\n- Ważne: brak testu")],
+    ],
+    ids=[
+        "odpowiedz-na-kazde-w-punktach-listy",
+        "odpowiedz-z-odstepami-i-crlf",
+        "odpowiedzi-w-komentarzu-i-recenzji",
+        "odpowiedz-na-nieznane-znalezisko-nie-przeszkadza",
+        "ostatni-fail-bez-oznaczen-nie-wymaga-odpowiedzi",
+    ],
+)
+def test_pr_z_odpowiedzia_autora_na_kazde_znalezisko_ostatniego_fail_jest_gotowy_do_merge(
+    tmp_path: Path, replies: list[tuple[str, ...]]
+) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM})
+    old = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
+    github.comment(1, FAIL_WITH_FINDINGS.format(old=old))
+    head = github.push_pull(1, {"kod/inne.py": "INNE: int = 2\n"})
+    for kind, body in replies:
+        text = body.format(old=old, head7=head[:7])
+        github.comment(1, text) if kind == "comment" else github.review(1, text, state=kind)
+    github.comment(1, f"WERDYKT: PASS {head}\nZnaleziska: 0 (Ważne 0, Drobne 0)")
+
+    answered = github.run("1", "--bez-merge")
+
+    assert answered.returncode == 0, answered.stdout + answered.stderr
+    assert _last_line(answered).startswith(f"SCAL OK | #1 {head[:7]} | gotowy do merge'a")
+
+
+def test_fail_dla_head_bez_odpowiedzi_podaje_obie_przyczyny_odmowy(tmp_path: Path) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM})
+    head = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
+    github.comment(1, FAIL_WITH_FINDINGS.format(old=head))
+
+    answered = github.run("1")
+
+    objection = OBJECTION.format(short=head[:7], head=head)
+    assert _last_line(answered) == f"SCAL ODMOWA | #1 {head[:7]} | {objection}; {MISSING.format(missing='W1, D1', short=head[:7], old=head)}"
+
+
 # ``tools/skille_dla_zmiany.py`` atrapa: skill z pliku ``skille.txt`` drzewa, w którym biegnie, i pliki zmiany od bazy z argumentu.
 SKILLS_FOR_CHANGE = """\
 import pathlib, subprocess, sys
@@ -916,6 +1026,28 @@ def test_przeglad_po_pass_dla_head_mowi_ze_werdykt_dotyczy_tego_head_a_rundy_z_f
     assert _lines(answered, "RUNDA |") == [f"RUNDA | rund z FAIL: 1, ostatni werdykt PASS dla {head[:7]}, czyli dla tego HEAD"]
 
 
+def test_przeglad_pokazuje_kazde_znalezisko_ostatniego_fail_z_najnowsza_odpowiedzia_autora_albo_brakiem(tmp_path: Path) -> None:
+    github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM, "skille.txt": "verify-a\n", "tools/skille_dla_zmiany.py": SKILLS_FOR_CHANGE})
+    first = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
+    github.comment(1, f"WERDYKT: FAIL {first}\nZnaleziska: 1 (Ważne 1, Drobne 0)\n- W1: kod/inne.py:1 — stare")
+    github.comment(1, f"ODPOWIEDŹ {first}\nW1: naprawione — w drugim commicie")
+    reviewed = github.push_pull(1, {"kod/inne.py": "INNE: int = 2\n"})
+    github.comment(1, f"WERDYKT: FAIL {reviewed}\nZnaleziska: 3 (Ważne 2, Drobne 1)\n- W1: kod/inne.py:1 — brak testu\n- W2: kod/inne.py:1 — zły typ\nD1: kod/inne.py:1 — nazwa")
+    github.comment(1, f"ODPOWIEDŹ {reviewed}\n- W1: zamierzone — test w innym PR")
+    github.comment(1, f"ODPOWIEDŹ {reviewed}\n- W1: naprawione — test w trzecim commicie\n- D1: bez znaczenia — nazwa z GLOSSARY.md")
+    head = github.push_pull(1, {"kod/inne.py": "INNE: int = 3\n"})
+
+    answered = github.run("1", "--przeglad")
+
+    assert answered.returncode == 0, answered.stdout + answered.stderr
+    assert _lines(answered, "ODPOWIEDŹ |") == [
+        "ODPOWIEDŹ | W1: kod/inne.py:1 — brak testu | naprawione — test w trzecim commicie",
+        "ODPOWIEDŹ | W2: kod/inne.py:1 — zły typ | brak",
+        "ODPOWIEDŹ | D1: kod/inne.py:1 — nazwa | bez znaczenia — nazwa z GLOSSARY.md",
+    ]
+    assert _lines(answered, "RUNDA |") == [f"RUNDA | rund z FAIL: 2, ostatni werdykt FAIL dla {reviewed[:7]}; zmiana od niego: git diff {reviewed} {head}"]
+
+
 def test_przeglad_nie_czeka_dluzej_niz_limit_na_skille_dla_zmiany(tmp_path: Path) -> None:
     github = FakeGitHub(tmp_path, {"kod/__init__.py": SUM, "tools/skille_dla_zmiany.py": "import time\n\ntime.sleep(60)\n"})
     head = github.open_pull(1, {"kod/inne.py": "INNE: int = 1\n"})
@@ -955,8 +1087,8 @@ def test_przeglad_bez_wyniku_skille_dla_zmiany_podaje_skille_nieznane_a_pr_bez_w
 @pytest.mark.parametrize(
     ("verdict", "decision"),
     [
-        ("\n  WERDYKT: PASS {head}  \n\nZnaleziska: 1 (Ważne 0, Drobne 1)\n- Drobne: nazwa\n", "PASS"),
-        ("WERDYKT: FAIL {head}\nZnaleziska: 4 (Ważne 1, Drobne 3)\n- Ważne: brak testu\n", "FAIL"),
+        ("\n  WERDYKT: PASS {head}  \n\nZnaleziska: 1 (Ważne 0, Drobne 1)\n- D1: kod/inne.py:1 — nazwa\n", "PASS"),
+        ("WERDYKT: FAIL {head}\nZnaleziska: 4 (Ważne 1, Drobne 3)\n- W1: brak testu\nD3: c\n  D1: a  \n- D2: b\nSprawdzone: W1 i D1.\n", "FAIL"),
     ],
     ids=["pass", "fail"],
 )
@@ -978,6 +1110,8 @@ def test_werdykt_w_postaci_ze_skilla_dla_head_trafia_na_pr_jako_komentarz_ktory_
 
 
 OLD = "0" * 40
+W_LABELS = "znalezisko zaczyna linię od „W<n>: ”, kolejno od W1"
+D_LABELS = "znalezisko zaczyna linię od „D<n>: ”, kolejno od D1"
 
 
 @pytest.mark.parametrize(
@@ -988,18 +1122,39 @@ OLD = "0" * 40
         ("Werdykt: PASS {head}\nZnaleziska: 0 (Ważne 0, Drobne 0)", "pierwsza linia „Werdykt: PASS {head}” to nie „WERDYKT: PASS {head}” ani „WERDYKT: FAIL {head}”"),
         (f"WERDYKT: PASS {OLD}\nZnaleziska: 0 (Ważne 0, Drobne 0)", f"werdykt dla {OLD[:7]}, a HEAD PR to {{head}}: przejrzyj git diff {OLD} {{head}} i wpisz SHA HEAD"),
         ("WERDYKT: PASS {head}\n- Drobne: nazwa", "druga linia „- Drobne: nazwa” to nie „Znaleziska: N (Ważne a, Drobne b)”"),
-        ("WERDYKT: FAIL {head}\nZnaleziska: 2 (Ważne 1, Drobne 0)", "Znaleziska: 2, a Ważne 1 i Drobne 0 dają 1"),
-        ("WERDYKT: PASS {head}\nZnaleziska: 4 (Ważne 0, Drobne 4)", "Drobne 4: podaj najwyżej 3, najważniejsze"),
-        ("WERDYKT: PASS {head}\nZnaleziska: 1 (Ważne 1, Drobne 0)", "PASS z Ważne 1: FAIL daje tylko Ważne znalezisko, a PASS jest bez Ważnych"),
-        ("WERDYKT: FAIL {head}\nZnaleziska: 1 (Ważne 0, Drobne 1)", "FAIL z Ważne 0: FAIL daje tylko Ważne znalezisko, a PASS jest bez Ważnych"),
+        ("WERDYKT: FAIL {head}\nZnaleziska: 2 (Ważne 1, Drobne 0)\nW1: a", "Znaleziska: 2, a Ważne 1 i Drobne 0 dają 1"),
+        ("WERDYKT: PASS {head}\nZnaleziska: 4 (Ważne 0, Drobne 4)\nD1: a\nD2: b\nD3: c\nD4: d", "Drobne 4: podaj najwyżej 3, najważniejsze"),
+        ("WERDYKT: PASS {head}\nZnaleziska: 1 (Ważne 1, Drobne 0)\nW1: a", "PASS z Ważne 1: FAIL daje tylko Ważne znalezisko, a PASS jest bez Ważnych"),
+        ("WERDYKT: FAIL {head}\nZnaleziska: 1 (Ważne 0, Drobne 1)\nD1: a", "FAIL z Ważne 0: FAIL daje tylko Ważne znalezisko, a PASS jest bez Ważnych"),
+        ("WERDYKT: FAIL {head}\nZnaleziska: 1 (Ważne 1, Drobne 0)\n- Ważne: brak testu", f"Ważne 1, a oznaczenia brak zamiast W1: {W_LABELS}"),
+        ("WERDYKT: FAIL {head}\nZnaleziska: 2 (Ważne 2, Drobne 0)\nW1: a\nW3: b", f"Ważne 2, a oznaczenia W1, W3 zamiast W1, W2: {W_LABELS}"),
+        ("WERDYKT: FAIL {head}\nZnaleziska: 2 (Ważne 2, Drobne 0)\nW1: a\nW1: b", f"Ważne 2, a oznaczenia W1, W1 zamiast W1, W2: {W_LABELS}"),
+        ("WERDYKT: FAIL {head}\nZnaleziska: 1 (Ważne 1, Drobne 0)\nW1: a\nD1: b", f"Drobne 0, a oznaczenia D1 zamiast żadnych: {D_LABELS}"),
+        ("WERDYKT: FAIL {head}\nZnaleziska: 1 (Ważne 1, Drobne 0)\nW01: a", f"Ważne 1, a oznaczenia brak zamiast W1: {W_LABELS}"),
         (
-            f"WERDYKT: FAIL {OLD}\nZnaleziska: 3 (Ważne 0, Drobne 4)",
+            f"WERDYKT: FAIL {OLD}\nZnaleziska: 3 (Ważne 0, Drobne 4)\nD1: a\nD2: b\nD3: c\nD4: d",
             f"werdykt dla {OLD[:7]}, a HEAD PR to {{head}}: przejrzyj git diff {OLD} {{head}} i wpisz SHA HEAD; "
             "Znaleziska: 3, a Ważne 0 i Drobne 4 dają 4; Drobne 4: podaj najwyżej 3, najważniejsze; "
             "FAIL z Ważne 0: FAIL daje tylko Ważne znalezisko, a PASS jest bez Ważnych",
         ),
     ],
-    ids=["pusty", "skrocony-sha", "male-litery", "inny-commit", "bez-linii-znalezisk", "zla-suma", "za-duzo-drobnych", "pass-z-waznym", "fail-bez-waznego", "kilka-naraz"],
+    ids=[
+        "pusty",
+        "skrocony-sha",
+        "male-litery",
+        "inny-commit",
+        "bez-linii-znalezisk",
+        "zla-suma",
+        "za-duzo-drobnych",
+        "pass-z-waznym",
+        "fail-bez-waznego",
+        "znalezisko-bez-oznaczenia",
+        "luka-w-numeracji",
+        "powtorzone-oznaczenie",
+        "drobne-oznaczone-ponad-liczbe",
+        "oznaczenie-z-zerem",
+        "kilka-naraz",
+    ],
 )
 def test_werdykt_niezgodny_z_postacia_ze_skilla_albo_z_head_nie_trafia_na_pr_a_odmowa_mowi_co_poprawic(
     tmp_path: Path, verdict: str, reason: str

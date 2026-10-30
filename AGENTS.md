@@ -7,7 +7,7 @@
 - Model domeny i reguły procesu: przeczytaj [`GLOSSARY.md`](GLOSSARY.md) oraz właściwe ADR-y w [`docs/adr/`](docs/adr/).
 - Tytuł i opis PR: napisz według skilla [`.agents/skills/pr/SKILL.md`](.agents/skills/pr/SKILL.md), także zamiast osobistego `/pr`, a gdy wzorowi czegoś brakuje, dopisz to do skilla.
 - Przed pushem: przejrzyj swój diff skillem [`przeglad`](.agents/skills/przeglad/SKILL.md) w trybie autora.
-- Przegląd PR: zanim napiszesz werdykt albo zlecisz przegląd, użyj skilla [`przeglad`](.agents/skills/przeglad/SKILL.md) w trybie recenzenta.
+- Przegląd PR: zanim napiszesz werdykt albo zlecisz przegląd, użyj skilla [`przeglad`](.agents/skills/przeglad/SKILL.md) w trybie recenzenta, a po werdykcie FAIL odpowiedz na każde znalezisko według jego sekcji „Odpowiedź autora na FAIL”.
 - Skille: przeczytaj [`docs/agents/skille.md`](docs/agents/skille.md) przed pushem i przed utworzeniem albo zmianą skilla.
 - Wydajność i środowisko taty: przy pomiarach wydajności albo decyzjach zależnych od jego sprzętu lub OneDrive przeczytaj [`docs/agents/komputer-taty.md`](docs/agents/komputer-taty.md).
 - Uruchamianie narzędzia przez człowieka: użyj [`README.md`](README.md).
@@ -18,12 +18,12 @@
 
 - Dziecko `delegate_task` kończy zadanie na pushu i utworzeniu PR, a zwraca URL PR i pełny SHA HEAD. Rodzic wywołuje `watch_pull_request` i kończy turę, a T3 budzi go po końcu CI.
 - Przegląd PR zlecaj zaraz po pushu, równolegle z CI.
-- PR jest gotowy do merge'a, gdy na HEAD PR zielony jest `Required CI status` (i każdy inny workflow niż `CI`, który biegnie na PR), przeszły skille `verify-*` z linii `SKILLE VERIFY` narzędzia `tools/skille_dla_zmiany.py` i jest `PASS` niezależnego recenzenta.
+- PR jest gotowy do merge'a, gdy na HEAD PR zielony jest `Required CI status` (i każdy inny workflow niż `CI`, który biegnie na PR), przeszły skille `verify-*` z linii `SKILLE VERIFY` narzędzia `tools/skille_dla_zmiany.py` i jest `PASS` niezależnego recenzenta, a autor odpowiedział na każde znalezisko ostatniego werdyktu `FAIL`.
   Skille `verify-*` przeszły, gdy ich polecenia z linii `LICZY CI` przechodzą w zielonym CI, a resztę ich workflow agent wykonał i skończył bez FAIL.
   Skryptów z linii `LICZY NOC` agent nie uruchamia: liczy je noc na `main` po merge'u, a ich porażka trafia do issue PR-u (ADR 0021).
   `SZYBKO OK` i `CI LOKALNIE OK` gotowości nie dają.
 - Mutacje zmienionych linii biegną nocą na `main` (ADR 0021), a każda przeżyta trafia do issue `Przeżyte mutacje z #N` (`ready-for-agent`) PR-u, który ostatni zmienił jej linię.
-- Merge PR: tylko `.venv/bin/python tools/scal_pr.py N` (Windows: `py -3 tools/scal_pr.py N`), nigdy gołe `gh pr merge`; warunki scalenia i postać werdyktów podaje jego `--help`. Zgoda to komentarz albo recenzja niezależnego recenzenta, której pierwsza linia to `WERDYKT: PASS <pełny SHA HEAD>`.
+- Merge PR: tylko `.venv/bin/python tools/scal_pr.py N` (Windows: `py -3 tools/scal_pr.py N`), nigdy gołe `gh pr merge`; warunki scalenia oraz postać werdyktów i odpowiedzi na nie podaje jego `--help`. Zgoda to komentarz albo recenzja niezależnego recenzenta, której pierwsza linia to `WERDYKT: PASS <pełny SHA HEAD>`.
 - CI i gałąź: przeczytaj [`docs/agents/pr-i-ci.md`](docs/agents/pr-i-ci.md), zanim uruchomisz lokalnie zadanie CI albo zrobisz rebase lub merge `main` do gałęzi, i gdy zadanie CI padło, status `scalenie z main` nie jest zielony, `main` jest czerwony albo chcesz sprawdzić każdy commit gałęzi.
 
 ## Reguły i co ich pilnuje
@@ -38,6 +38,7 @@ Szczegóły strażnika, jego wyjątki i granicę (co łapie tylko przegląd) opi
 | Push agenta, który wysyła HEAD, przechodzi tylko wtedy, gdy ruff i mypy dla obu systemów nie zgłaszają błędów w drzewie roboczym. | brama `tools/hooks/pre-push`, `tests/test_brama_pre_push.py` |
 | Tag Wydania `v*` i GitHub Release tworzy tylko narzędzie Wydań (#316), które ustawia `MAXIMISEART_WYDANIE=1` (ADR 0014), a agent nie robi tego ani `git push`, także z `--no-verify`, ani `gh release create`, `gh api` czy stroną GitHuba. | brama `tools/hooks/pre-push`, `tests/test_brama_pre_push.py` |
 | Opis PR ma każdy nagłówek `##` wzoru ze skilla `pr`, w jego kolejności. | `tools/scal_pr.py`, `tests/test_scal_pr.py` |
+| Każde znalezisko werdyktu ma numer (`W1`, `D1`), a PR scala się dopiero, gdy autor odpowiedział na każde znalezisko ostatniego werdyktu `FAIL` (`naprawione`, `błędne`, `zamierzone` albo `bez znaczenia` z powodem). | `tools/scal_pr.py`, `tests/test_scal_pr.py` |
 | Na własny proces agent czeka na powiadomienie `run_in_background`, a na CI rodzic przez `watch_pull_request`. | hook `PreToolUse` `tools/hooks/czekanie.py` (`.claude/settings.json`), `tests/test_czekanie.py` |
 | Agent w trybie bypass nie czeka na zgodę człowieka na polecenie Basha: gdy Claude Code by o nią zapytał (kontrola `rm`, której nie zdejmuje `permissions.allow`, albo reguła `permissions.ask`), od razu oddaje mu odmowę z poprawką, którą podaje komunikat hooka; po aktualizacji Claude Code uruchom `tools/wyrocznia_zgody.py`. | hook `PermissionRequest` `tools/hooks/zgoda.py` (`.claude/settings.json`), `tests/test_zgoda.py` |
 | Issue tego repozytorium, które opis PR wskazuje jako naprawione, zamyka się przy merge'u PR do domyślnej gałęzi, nie ręcznie: `Closes #N` zamyka GitHub, a słowa „Naprawia” GitHub nie zna, więc `tools/scal_pr.py` renderuje opis rendererem GitHuba i zamyka z komentarzem o PR i commicie merge'a issues z linków na liście numerów po „Naprawia”, które zaczyna linię akapitu albo punktu listy stojącego tylko w akapitach i listach, poza kodem i przekreśleniem, a odwołania do innego repozytorium (Zgłoszenia) zostawia. | `tools/scal_pr.py`, `tests/test_scal_pr.py` |
