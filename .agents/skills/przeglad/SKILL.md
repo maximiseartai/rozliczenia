@@ -40,6 +40,7 @@ Pełnych mutacji i pełnego CI recenzent nie uruchamia lokalnie, bo liczy je CI 
 Pierwsza linia to `WERDYKT: PASS <pełny SHA HEAD>` albo `WERDYKT: FAIL <pełny SHA HEAD>`.
 Druga podaje liczbę znalezisk w postaci `Znaleziska: N (Ważne a, Drobne b)`.
 Dalej znaleziska od najważniejszego, każde z oznaczeniem, plik:linia i dowodem, a na końcu krótko, co sprawdzone i z jakim wynikiem.
+Każde Ważne nazywa klasę błędu (np. parser, który przepuszcza formę, której nie zna) i wymienia wszystkie jej wystąpienia w diffie, każde z plik:linia, żeby autor poprawił całą klasę w jednej rundzie.
 
 ## Kolejne rundy
 
@@ -74,12 +75,27 @@ Kto zleca przegląd, podaje numer PR i katalog biegu, w którym leży plik werdy
 1. Uruchom `.venv/bin/python tools/scal_pr.py <PR> --przeglad`.
    Drukuje pełny SHA HEAD, merge-base z bazą, `git diff --stat`, zmienione pliki, wynik `tools/skille_dla_zmiany.py` dla HEAD PR i poprzednie werdykty z ich SHA i dwiema pierwszymi liniami.
    Krok kończy się, gdy masz SHA HEAD i merge-base; poprzedni werdykt znaczy, że to kolejna runda (sekcja „Kolejne rundy”).
-2. Przejrzyj diff według sekcji „Co jest porażką” i „Dowody”, a skille z linii `SKILLE VERIFY` wykonaj według sekcji `What CI runs and what stays local` każdego z nich.
+2. Znajdź kandydatów na znaleziska.
+   W pierwszej rundzie (PR bez werdyktu, linia `RUNDA | 1`) uruchom w jednej wiadomości trzech szukających: agentów (narzędzie Agent) z modelem Opus i `run_in_background: false`.
+   Każdy dostaje ten skill, katalog repo, pełny SHA HEAD, merge-base, tytuł i opis PR oraz jedną soczewkę:
+   - zachowanie i błędy: defekty z sekcji „Co jest porażką” w diffie i w niezmienionym kodzie, który diff uruchamia w nowym stanie;
+   - obietnice i dowody: każde zdanie opisu PR oraz docstringu, `--help`, `SKILL.md` i ADR zmienionego w diffie ma test, przebieg albo mutację, która je pokazuje;
+   - Windows, Python 3.11 i kolejność: zachowanie zależne od systemu albo wersji Pythona (sekcja „Tools and Platforms” w `CODING_STANDARDS.md`) i test zależny od kolejności, sąsiadów w xdist, wątku albo zegara.
+   Szukający oddaje w odpowiedzi listę kandydatów, każdy z oznaczeniem Ważne albo Drobne, tytułem, plik:linia, mechanizmem i poleceniem, które go odtworzy.
+   W kolejnej rundzie szukasz sam według sekcji „Kolejne rundy”.
+   Krok kończy się, gdy masz listę od każdego szukającego i połączyłeś kandydatów o tym samym mechanizmie w jednego.
+3. Potwierdź każdego kandydata na Ważne osobnym agentem potwierdzającym (Opus, `run_in_background: false`, najwyżej 4 naraz w jednej wiadomości).
+   Potwierdzający dostaje tytuł i opis PR, merge-base, SHA HEAD i jednego kandydata, odtwarza defekt powtarzalnym dowodem z sekcji „Dowody” (polecenie i jego wynik), powtarza to samo na merge-base i szuka w diffie innych wystąpień tej samej klasy błędu.
+   Oddaje `POTWIERDZONE` z poleceniem, wynikiem i wystąpieniami klasy albo `ODRZUCONE` z powodem, także wtedy, gdy defekt jest już na merge-base, łapie go ruff, mypy, lint frontendu albo strażnik z tabeli `CODING_STANDARDS.md`, albo na jego linii stoi wyjątek z powodem, terminem i zgodą Maksa.
+   Odrzucony kandydat odpada, a luka bez złego zachowania zostaje najwyżej Drobnym.
+   Drobne wybierasz sam z kandydatów, najwyżej 3, najważniejsze.
    Każde potwierdzone znalezisko z oznaczeniem, plik:linia i dowodem od razu dopisz do pliku `runda-<k>.md` w katalogu werdyktu, żeby przerwany przegląd zostawił znaleziska.
-   Krok kończy się, gdy przejrzałeś cały diff, a każde znalezisko jest w pliku.
-3. Dopisz na górę pliku dwie linie z sekcji „Postać werdyktu”, a na koniec krótko, co sprawdzone i z jakim wynikiem.
+   Krok kończy się, gdy każdy kandydat jest w pliku z dowodem albo odrzucony z powodem.
+4. Skille z linii `SKILLE VERIFY` wykonaj według sekcji `What CI runs and what stays local` każdego z nich.
+   Krok kończy się, gdy każdy skill skończył się bez FAIL albo jego FAIL jest w pliku jako Ważne.
+5. Dopisz na górę pliku dwie linie z sekcji „Postać werdyktu”, a na koniec krótko, co sprawdzone i z jakim wynikiem.
    Krok kończy się, gdy liczby w drugiej linii zgadzają się ze znaleziskami w pliku.
-4. Opublikuj werdykt: `.venv/bin/python tools/scal_pr.py <PR> --werdykt <plik>`.
+6. Opublikuj werdykt: `.venv/bin/python tools/scal_pr.py <PR> --werdykt <plik>`.
    Narzędzie sprawdza obie linie i SHA HEAD, a gdy odmawia, popraw plik według jego komunikatu i uruchom je ponownie.
    Gdy HEAD PR zmienił się w trakcie, przejrzyj diff od przejrzanego SHA do nowego HEAD, zanim zmienisz SHA w pliku.
    Krok kończy się linią `WERDYKT OK` z adresem komentarza: oddaj wywołującemu ścieżkę pliku i tę linię.
