@@ -86,17 +86,18 @@ cover three definitions in files that Centrum changes often: `lifespan` in
 rest of their files, is drift. Name these three files here without their
 `src/…` path in backticks: such a path makes the whole file covered.
 
-**Sync commit: `0ab6ff1b`** (2026-10-30, #665: after a refused comment the
-queue file keeps the number of the Uwaga's issue). The checker and the model
-share it: at this commit both were confirmed to describe the code above. The
-checker leaves `Rejected` out, so #665 changed only the model. Before it,
-`6f94edb8` was the sync of both, and since the checker's earlier sync
-`8122ab4c` only `15362856` changed a covered file: `Outbox` calls
-`on_rejected` after a refused content, which neither the checker nor the
-model describes. To see whether they need another look:
+**Sync commit: `1c143ac4`** (2026-10-30, #48: one pass of the queue per
+folder, also between Centrum processes, behind the pass lock `_alone`). The
+checker and the model share it: at this commit both were confirmed to describe
+the code above. The checker runs one queue at a time, so in it #48 only hands
+`Outbox` its lock file. Before it, `0ab6ff1b` (#665) was the sync of both, and before that
+`6f94edb8`; since the checker's earlier sync `8122ab4c` only `15362856`
+changed a covered file: `Outbox` calls `on_rejected` after a refused content,
+which neither the checker nor the model describes. To see whether they need
+another look:
 
 ```bash
-git log --oneline 0ab6ff1b..HEAD -- src/rozliczenia/centrum/outbox.py src/rozliczenia/centrum/keyed_box.py src/rozliczenia/centrum/report_box.py src/rozliczenia/centrum/atomic_file.py
+git log --oneline 1c143ac4..HEAD -- src/rozliczenia/centrum/outbox.py src/rozliczenia/centrum/keyed_box.py src/rozliczenia/centrum/report_box.py src/rozliczenia/centrum/atomic_file.py
 ```
 
 A change to the three definitions above shows as a `UWAGA:` line of
