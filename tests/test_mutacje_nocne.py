@@ -705,6 +705,29 @@ def test_zgloszenie_z_polecenia_workflow_zaklada_issue_i_konczy_sie_ok(
     assert wyjscie[-1] == "MUTACJE NOCNE OK | części 1 | przeżyło 1" + (" | zadania skilli 2 | padło skryptów 1" if ze_skryptami else "")
 
 
+def test_skrypt_ktory_padl_w_nocy_bez_commitu_od_bazy_czerwieni_przebieg_bez_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo, _ = _historia_skilli(tmp_path)
+    for modul in (mutacje_nocne, mutacje_skilli):
+        monkeypatch.setattr(modul, "ROOT", repo)
+    monkeypatch.setattr(mutacje_skilli, "SKILLS", repo / ".agents" / "skills")
+    github = GitHubWPamieci()
+    monkeypatch.setattr(mutacje_nocne, "GhApi", lambda: github)
+    zapisy = _wykonania(tmp_path / "zapisy", {"mutacje-1": (PLAN_SKILLI.digest, {SKRYPT_A: "fail"}), "mutacje-2": (PLAN_SKILLI.digest, {SKRYPT_A: "ok", SKRYPT_B: "ok"})})
+    plan = tmp_path / "plan-skilli" / "plan.json"
+    plan.parent.mkdir()
+    plan.write_text(PLAN_SKILLI.do_json(), encoding="utf-8")
+    # Ostatnia noc była zielona na HEAD, więc ta nie ma commitu od bazy.
+    baza = git(repo, "rev-parse", "HEAD")
+
+    kod = mutacje_nocne.main(["zglos", "--baza", baza, "--zapisy", str(zapisy), "--czesci", "0", "--run", RUN, "--plan-skilli", str(plan)])
+
+    assert capsys.readouterr().out.splitlines() == [f"MUTACJE NOCNE FAIL | skrypty mutacji skilli padły, a od bazy {baza} main nie ma commitu, któremu je przypisać: {SKRYPT_A}"]
+    assert kod == 1
+    assert github.wyslane == []
+
+
 @pytest.mark.parametrize("brak", ["polecenie", "--baza", "--zapisy", "--czesci", "--run"])
 def test_zgloszenie_bez_argumentu_z_planu_nocy_konczy_sie_bledem_uzycia(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], brak: str
