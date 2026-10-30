@@ -107,6 +107,7 @@ script checks the worktree's own `src`.
 | `URUCHOMIENIA OK, ZNANE USTALENIA: n` | 0 | Only the known findings below, each printed with its counterexample. |
 | `URUCHOMIENIA: NOWE NARUSZENIE (n)` | 1 | A rule breaks in a way not listed below, or a scope never reached a behaviour it must reach (`BRAK_ZAMKNIECIA`, `BRAK_ODMOWY_ZAMKNIECIA`, `BRAK_WYNIKU`, `BRAK_ODMOWY_STARTU`), so the check would prove nothing. |
 | `URUCHOMIENIA: LUKA MODELU (n)` | 2 | `runs.py` or `shutdown.py` uses `threading` in a way the model does not cover (for example `RLock`, `Condition`, `wait(timeout=...)`). No verdict on the rules. |
+| `URUCHOMIENIA: ZAWIESZENIE POZA MODELEM (n)` | 3 | No modelled thread took a step for 10 s: the code under check waits on something the model does not replace. The scope stops there, so there is no verdict on the rules. |
 
 `--scope zamknij-w-trakcie`, `--scope dwie-karty`, `--scope aktualizacja` or `--scope przywracanie` runs one scope. `--strict`
 counts known findings as violations too: use it to confirm a fix.
@@ -116,8 +117,9 @@ counts known findings as violations too: use it to confirm a fix.
 The script runs the real `RunHost` and `Shutdown`, wired as in `create_app`, in
 modelled threads. FastAPI runs the sync handlers `startRun`, `decideRun` and `closeCentrum`
 in a thread pool, so tabs really do run in parallel. Each modelled thread is a
-greenlet on the script's one OS thread, so a busy CI runner slows the check only by
-its share of a CPU, not by a kernel thread switch at every step (#565). Inside `runs.py` and
+greenlet on one OS thread per scope, so a busy CI runner slows the check only by
+its share of a CPU, not by a kernel thread switch at every step (#565). The calling thread
+stops the scope when no modelled thread takes a step for 10 s (`STEP_LIMIT_SECONDS`). Inside `runs.py` and
 `shutdown.py`, `threading` is replaced by model primitives: entering
 `RunHost._lock`, each `Event.set`/`clear`/`wait` and starting the Uruchomienie
 thread is one indivisible step, as is each Centrum log entry and
@@ -191,6 +193,12 @@ requests, `wątek Uruchomienie n` is the thread `RunHost.start` spawned,
   it would not block), or ask whether the code should avoid it. Never reword a
   rule or shrink a scope to make a real counterexample disappear.
 
+**ZAWIESZENIE POZA MODELEM** is not a counterexample. About 10 s after the code under check
+blocks, the check prints a line like `ZAWIESZENIE POZA MODELEM: karta Uruchom 2: brak kolejnego kroku przez 10 s po kroku „…”; kod czeka poza modelem w runs.py:LINE start`.
+The line names the modelled thread, its last step and its frames below the checker, innermost first, and the numbered schedule up to that point follows it.
+At that place the code takes a real lock, a sleep, a queue or a loop that no model primitive replaces, and that blocks every modelled thread at once.
+Replace the wait by a model step in the harness, or treat it as LUKA MODELU, or ask whether the code should wait there at all.
+
 ## After changing the checker or an intended change to the covered code
 
 CI proves the check can still fail: the night on `main` runs the script below after a
@@ -210,7 +218,7 @@ the actions after the result moved below `ended = True`,
 `Shutdown.request` without the refusal, an accepted shutdown that does not set
 `_closing`, `begin_update` without the closing or the running check, `start`
 without the updating check, `begin_restore` without the running check,
-`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`.
+`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`, and a real lock outside the model around `start` gives `ZAWIESZENIE POZA MODELEM` after 10 s.
 CI runs this in the `mutations` job. A mutation reported as `NIEAKTUALNA` no longer matches its file.
 Rewrite its `anchor` and `replacement` in `check_runs_mutations.py` so it breaks
 the same rule again in the new code. Then move the sync commit forward as above.

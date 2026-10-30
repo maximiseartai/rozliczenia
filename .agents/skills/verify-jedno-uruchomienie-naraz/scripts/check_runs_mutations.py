@@ -111,6 +111,16 @@ MUTATIONS = (
         "URUCHOMIENIA: NOWE NARUSZENIE",
     ),
     Mutation(
+        "prawdziwa blokada spoza modelu w RunHost.start",
+        (
+            Edit(RUNS, "import threading\nimport uuid\n", "import threading\nimport uuid\n_REAL = __import__('_thread').allocate_lock()\n"),
+            Edit(RUNS, "    def start(self, prepared: PreparedRun[Any, Any]) -> contract.RunView:\n        with self._lock:\n", "    def start(self, prepared: PreparedRun[Any, Any]) -> contract.RunView:\n        with _REAL, self._lock:\n"),
+        ),
+        (EXPLORER, "--scope", "dwie-karty"),
+        "druga karta „Uruchom” czeka na blokadę, której model nie podmienia, a sprawdzenie wisi do limitu pytest",
+        "URUCHOMIENIA: ZAWIESZENIE POZA MODELEM",
+    ),
+    Mutation(
         "RLock zamiast Lock w RunHost",
         (Edit(RUNS, "        self._lock = threading.Lock()\n", "        self._lock = threading.RLock()\n"),),
         (EXPLORER, "--scope", "zamknij-w-trakcie"),
