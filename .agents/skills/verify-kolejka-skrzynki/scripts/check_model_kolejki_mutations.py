@@ -121,9 +121,9 @@ MUTATIONS = (
             Edit(
                 MODEL,
                 '          /\\ Odrzuc(q, w, "comment: Rejected, plik czeka do nastepnego startu")\n'
-                "          /\\ UNCHANGED <<issues, kom, stopped, sieci, zgubione>>\n",
+                "          /\\ UNCHANGED <<issues, kom, stopped, nieodczytany, sieci, zgubione>>\n",
                 '          /\\ Idz(q, "usun", "comment: Rejected, _remove")\n'
-                "          /\\ UNCHANGED <<issues, kom, stopped, rejected, sieci, zgubione>>\n",
+                "          /\\ UNCHANGED <<issues, kom, stopped, nieodczytany, rejected, sieci, zgubione>>\n",
             ),
         ),
         _check("odmowa-tresci"),
@@ -132,10 +132,20 @@ MUTATIONS = (
     ),
     Mutation(
         "nieczytelny plik kolejki usunięty zamiast pominięty (_skip_unreadable: _remove)",
-        (Edit(MODEL, '/\\ Idz(q, "plik", "_queued: read_text rzuca OSError, _skip_unreadable pomija plik")\n',
+        (Edit(MODEL, '/\\ Idz(q, "plik", "_queued: read_text rzuca OSError, _read_failed, _skip_unreadable pomija plik")\n',
               '/\\ Idz(q, "usun", "_queued: read_text rzuca OSError, _remove")\n'),),
         _check("odczyt"),
-        "Kontrola ilości, której pliku raz nie dało się odczytać, znika bez wysyłki, choć jej znalezisko wybacza tylko Zbieganie",
+        "Kontrola ilości, której pliku raz nie dało się odczytać, znika bez wysyłki",
+        NEW,
+    ),
+    Mutation(
+        "pominięty nieczytelny plik nie nastawia budzenia RETRY_S (_send_all: _read_failed = True)",
+        (Edit(MODEL, "                         /\\ nieodczytany' = Ustaw(nieodczytany, q, TRUE)\n"
+              '                         /\\ Idz(q, "plik", "_queued: read_text rzuca OSError,',
+              "                         /\\ UNCHANGED nieodczytany\n"
+              '                         /\\ Idz(q, "plik", "_queued: read_text rzuca OSError,'),),
+        _check("odczyt"),
+        "Kontrola ilości, której pliku raz nie dało się odczytać, czeka do następnej wysyłki albo startu",
         NEW,
     ),
     Mutation(
@@ -153,7 +163,7 @@ MUTATIONS = (
                 MODEL,
                 '          /\\ Stop(q, "labelled_issues: Unreachable (brak sieci), przejscie staje")\n',
                 '          /\\ Odrzuc(q, biez[q], "labelled_issues: Unreachable, plik do nastepnego startu")\n'
-                "          /\\ UNCHANGED stopped\n",
+                "          /\\ UNCHANGED <<stopped, nieodczytany>>\n",
             ),
             Edit(
                 MODEL,
@@ -172,15 +182,15 @@ MUTATIONS = (
     ),
     Mutation(
         "przejście, które stanęło, nie zapisuje _stopped_on",
-        (Edit(MODEL, "    /\\ stopped' = Ustaw(stopped, q, TRUE)\n    /\\ Idz(q, \"zwolnij\", opis)\n",
-              "    /\\ UNCHANGED stopped\n    /\\ Idz(q, \"zwolnij\", opis)\n"),),
+        (Edit(MODEL, "    /\\ stopped' = Ustaw(stopped, q, TRUE)\n    /\\ UNCHANGED nieodczytany\n",
+              "    /\\ UNCHANGED <<stopped, nieodczytany>>\n"),),
         _check("okres"),
         "po braku sieci nic nie nastawia budzenia i wysyłka czeka do następnego startu",
         NEW,
     ),
     Mutation(
         "brak budzenia RETRY_S (_drain: clock.after)",
-        (Edit(MODEL, "            /\\ armed' = Ustaw(armed, q, armed[q] \\/ stopped[q])\n",
+        (Edit(MODEL, "            /\\ armed' = Ustaw(armed, q, armed[q] \\/ stopped[q] \\/ nieodczytany[q])\n",
               "            /\\ UNCHANGED armed\n"),),
         _check("okres"),
         "po braku sieci wysyłka czeka do następnego startu albo następnej wysyłki",

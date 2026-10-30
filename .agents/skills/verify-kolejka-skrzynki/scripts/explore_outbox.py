@@ -566,7 +566,7 @@ def _state(
     The faults so far count as a set plus the verdict of each ``Excuse`` on them: an excuse that holds keeps holding,
     and the only order it reads (a failed marker before a kill at the removal) is in the set as the failed marker.
 
-    Also whether a ``RETRY_S`` wake is armed, and ``_stopped_on`` and ``_retry_armed``, which decide in ``_drain``
+    Also whether a ``RETRY_S`` wake is armed, and ``_stopped_on``, ``_read_failed`` and ``_retry_armed``, which decide in ``_drain``
     whether the next one is, and ``_draining``, ``_again`` and the queue threads started and not run yet, which decide
     whether ``send_in_background`` starts a pass. Left out on purpose, because they do not change what is sent: ``_first_comments``
     (``delivered``, ``wait_delivered``), ``_rejected`` (no ``Rejected`` here) and the key verdict of ``KeyedBox``
@@ -593,6 +593,7 @@ def _state(
         tuple(failures),
         bool(clock.armed),
         outbox._stopped_on,
+        outbox._read_failed,
         outbox._retry_armed,
         outbox._draining,
         outbox._again,
