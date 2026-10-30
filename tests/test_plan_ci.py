@@ -540,7 +540,10 @@ def test_bramka_ponawia_najwyzej_piec_testow_bo_wiecej_porazek_to_nie_flaky_test
     assert plan_ci.wykonaj(plan_ci.Plan("pull_request", plan_ci.CEL_S, (), (job,)), job.id) == code
     flaky_testy = [] if code else niestabilne_testy.flaky_testy_z_json(niestabilne_testy.FLAKY_TESTY.read_text(encoding="utf-8"))[0]
     assert [flaky.test for flaky in flaky_testy] == ([] if code else [f"tests/test_flaky.py::test_pada_raz_{numer}" for numer in range(5)])
-    assert ("PONOWIENIE | bez ponowienia: padło 6 testów, a flaky testy to najwyżej 5" in capsys.readouterr().out) == bool(code)
+    log = capsys.readouterr().out.splitlines()
+    assert ("PONOWIENIE | bez ponowienia: padło 6 testów, a flaky testy to najwyżej 5" in log) == bool(code)
+    przeszly = ", ".join(f"tests/test_flaky.py::test_pada_raz_{numer}" for numer in range(5))
+    assert [linia for linia in log if linia.startswith("FLAKY TESTY |")] == ([] if code else [f"FLAKY TESTY | przeszły po ponowieniu: {przeszly}"])
     assert niestabilne_testy.FLAKY_TESTY.exists() == (not code)
 
 
