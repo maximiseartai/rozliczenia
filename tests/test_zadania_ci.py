@@ -56,6 +56,16 @@ def test_push_do_main_nie_anuluje_trwajacego_runu_a_nowy_push_pr_anuluje_stary()
     assert workflow["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
 
 
+def test_kolejka_scalen_dostaje_required_z_bramki_pr_dla_scalenia_z_tym_co_przed_nia() -> None:
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    plan = next(step for step in workflow["jobs"]["plan"]["steps"] if step.get("id") == "plan")
+    command = shlex.split(plan["run"])
+
+    assert workflow[True]["merge_group"] == {"types": ["checks_requested"]}  # YAML 1.1 czyta klucz „on” jako True
+    assert command[command.index("--zdarzenie") + 1] == "${{ github.event_name == 'merge_group' && 'pull_request' || github.event_name }}"
+    assert command[command.index("--baza") + 1] == "HEAD^1"
+
+
 def test_required_biegnie_takze_w_anulowanym_runie_bo_pominiety_wymagany_check_przepuszcza_merge() -> None:
     assert jobs()[REQUIRED]["if"] == "${{ always() }}"
 

@@ -1,11 +1,12 @@
-"""Jedyna droga merge'a PR przez agenta: ``gh pr merge`` tylko po sprawdzeniu gotowości tuż przed nim.
+"""Jedyna droga merge'a PR przez agenta: merge albo kolejka scaleń tylko po sprawdzeniu gotowości tuż przed nimi.
 
-Narzędzie scala PR numer N do jego bazy, gdy jednocześnie:
+Narzędzie scala PR numer N do jego bazy (albo wstawia go do kolejki scaleń bazy, która ją ma), gdy jednocześnie:
 
 1. PR jest otwarty, nie jest szkicem i nie pochodzi z forka (z forka ruff i mypy biegłyby na obcym kodzie);
 2. check ``Required CI status`` z GitHub Actions na HEAD PR skończył się sukcesem (jak w rulesecie ``main``:
    CheckRun z workflow, nie status commitu, który może ustawić każdy z prawem zapisu);
-3. najnowszy werdykt dla HEAD PR to ``PASS``;
+3. najnowszy werdykt dla HEAD PR, licząc też werdykty commitów, z których HEAD powstał samymi czystymi scaleniami
+   bazy, to ``PASS``;
 4. opis PR ma każdy nagłówek ``##`` wzoru z ``.agents/skills/pr/SKILL.md``, każdy jako osobną linię i w kolejności
    wzoru, więc każdy PR ma te same sekcje, a sekcja dopisana do wzoru od razu obowiązuje;
 5. HEAD PR scala się z bieżącą bazą z ``origin`` bez konfliktu, a ruff i mypy dla obu systemów przechodzą na
@@ -22,13 +23,24 @@ Sprzeciwem jest też recenzja w stanie ``CHANGES_REQUESTED``. Inny tekst, także
 skróconym SHA, nie jest werdyktem. Zgodę pisze niezależny recenzent, nie autor zmiany: ``PASS`` mówi, że przegląd
 nie znalazł problemów, a skille ``verify-*`` z linii ``SKILLE VERIFY`` ``tools/skille_dla_zmiany.py`` przeszły na
 tym SHA (ich polecenia z linii ``LICZY CI`` w CI, reszta workflow u agenta). Rozstrzyga najnowszy werdykt dla HEAD:
-sprzeciw po ``PASS`` odbiera zgodę, nowszy ``PASS`` ją przywraca, a werdykt starszego commitu nie przechodzi na nowy
-push. Komentarz edytowany liczy się z treścią po edycji, ale w miejscu utworzenia, a ukryty komentarz nadal się liczy.
+sprzeciw po ``PASS`` odbiera zgodę, nowszy ``PASS`` ją przywraca. Werdykt starszego commitu przechodzi na HEAD tylko
+wtedy, gdy HEAD powstał z niego samymi czystymi scaleniami bazy (``reviewed_as``): każdy commit po drodze ma dwóch
+rodziców, drugi jest w bazie, a drzewo to dokładnie wynik ``git merge-tree`` rodziców bez konfliktu. Zmiana treści,
+konflikt rozwiązany ręcznie, scalenie innej gałęzi i rebase potrzebują nowego werdyktu. Komentarz edytowany liczy się z treścią po edycji, ale w miejscu utworzenia, a ukryty komentarz nadal się liczy.
 
 Gdy któryś warunek nie zachodzi, narzędzie nie scala i kończy się linią ``SCAL ODMOWA | #N <sha> | <przyczyny>``.
 Warunki 1–4 sprawdza razem i podaje wszystkie przyczyny; warunek 5 trwa dłużej, więc biegnie dopiero po nich.
 Przed merge'em sprawdza, że baza w ``origin`` nie przesunęła się w trakcie sprawdzania, a ``gh pr merge
---match-head-commit`` odrzuca PR, którego HEAD zmienił się po sprawdzeniu. Po merge'u uruchamia
+--match-head-commit`` odrzuca PR, którego HEAD zmienił się po sprawdzeniu.
+
+Gdy baza PR ma kolejkę scaleń (ruleset z ``merge_queue``), narzędzie nie scala samo, tylko wstawia PR do kolejki
+(``enqueuePullRequest`` z ``expectedHeadOid``, więc GitHub odrzuca PR, którego HEAD zmienił się po sprawdzeniu),
+a przesunięcia bazy nie sprawdza, bo kolejka i tak sprawdza w CI scalenie z bazą i PR-ami przed nim. Potem czeka do
+``--czekaj`` sekund (domyślnie ``QUEUE_WAIT_S``) i kończy się jednym z trzech wyników: ``SCAL OK`` ze ``scalony
+… przez kolejkę`` (kod 0, dalej jak po merge'u), ``SCAL ODMOWA`` z powodem, dla którego kolejka usunęła PR (kod 1,
+np. czerwone CI scalenia), albo ``SCAL KOLEJKA`` z miejscem w kolejce (kod 2), gdy czas minął. Uruchomione ponownie
+dla PR, który stoi w kolejce albo kolejka już go scaliła, nie sprawdza warunków od nowa, tylko czeka dalej albo
+kończy po merge'u. Po merge'u uruchamia
 ``tools/sprzatanie.py``, jeśli istnieje, i podaje ostatnią linię jego raportu: bez ``--usun`` sprzątanie niczego nie
 usuwa, tylko mówi, które lokalne gałęzie i worktree można usunąć. Sprzątanie, które przekroczy czas, kończy się
 ostrzeżeniem w linii ``SCAL OK``, bo PR jest już scalony.
@@ -75,13 +87,15 @@ ostrzeżeń stoi w linii ``SCAL OK`` z kodem 0, bo PR jest już scalony. Z ``--b
 zamyka, a linia podaje ``po merge'u zamknie: #N`` (a zamiast „nie zamknięto …” ostrzeżenia ``nie sprawdzono …``).
 
 Kod 0 i ``SCAL OK`` znaczą, że PR jest scalony (albo z ``--bez-merge``: że byłby); linia po merge'u podaje SHA
-commitu merge'a i bazy, z którą sprawdziła scalenie. Kod 1 to odmowa albo błąd narzędzia (``SCAL FAIL``).
+commitu merge'a i bazy, z którą sprawdziła scalenie. Kod 1 to odmowa albo błąd narzędzia (``SCAL FAIL``), a kod 2
+to PR, który nadal czeka w kolejce scaleń (``SCAL KOLEJKA``).
 
 Komentarze, recenzje i checki pochodzą z jednego ``gh pr view --json``, które doczytuje wszystkie strony
 komentarzy (sprawdzone na PR z 337 komentarzami, gh 2.101).
 
     .venv/bin/python tools/scal_pr.py 336               # sprawdza i scala
     .venv/bin/python tools/scal_pr.py 336 --bez-merge   # tylko sprawdza
+    .venv/bin/python tools/scal_pr.py 336 --czekaj 0    # wstawia do kolejki scaleń i nie czeka
 """
 
 from __future__ import annotations
@@ -94,6 +108,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from urllib.parse import urlsplit
 
 import potomne
@@ -106,6 +121,31 @@ TRUSTED = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 CLEANUP = ROOT / "tools" / "sprzatanie.py"
 TEMPLATE = ROOT / ".agents" / "skills" / "pr" / "SKILL.md"
 CLEANUP_TIMEOUT_S = 300
+QUEUE_WAIT_S = 480
+QUEUE_POLL_S = 20
+IN_QUEUE = 2
+QUEUE_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+      state
+      isMergeQueueEnabled
+      mergeCommit { oid }
+      mergeQueueEntry { state position }
+      timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+        filteredCount
+        nodes { ... on RemovedFromMergeQueueEvent { reason } }
+      }
+    }
+  }
+}
+"""
+ENQUEUE = """
+mutation($id: ID!, $head: GitObjectID!) {
+  enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head}) { mergeQueueEntry { state position } }
+}
+"""
 LINK = "\x01"
 NOT_TEXT = "\x00"
 _REFERENCE = rf"(?:{LINK}|(?:[\w.-]+/[\w.-]+)?#\d+)"
@@ -133,6 +173,19 @@ class Pull:
 
 class _Refused(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class _Queue:
+    """Stan PR w kolejce scaleń jego bazy z GitHuba."""
+
+    enabled: bool
+    pull_id: str
+    state: str
+    merge_commit: str | None
+    entry: str | None  # „QUEUED, pozycja 1”, gdy PR stoi w kolejce
+    removals: int  # ile razy kolejka usunęła PR
+    reason: str | None  # powód ostatniego usunięcia
 
 
 def _gh(*arguments: str, stdin: str | None = None) -> str:
@@ -177,8 +230,8 @@ def _body_problem(body: str) -> str | None:
     return f"opis: brak {', '.join(f'„{heading}”' for heading in missing)} w kolejności wzoru {TEMPLATE.relative_to(ROOT).as_posix()}"
 
 
-def _verdict(verdict: dict[str, object], head: str) -> str | None:
-    """``PASS`` albo ``FAIL`` dla ``head``; ``None``, gdy komentarz albo recenzja nie jest werdyktem dla ``head``."""
+def _verdict(verdict: dict[str, object], reviewed: frozenset[str]) -> str | None:
+    """``PASS`` albo ``FAIL`` dla jednego z ``reviewed``; ``None``, gdy komentarz albo recenzja nie jest takim werdyktem."""
 
     if verdict["authorAssociation"] not in TRUSTED or verdict.get("state") == "PENDING":
         return None
@@ -186,15 +239,15 @@ def _verdict(verdict: dict[str, object], head: str) -> str | None:
         return "FAIL"
     lines = [line.strip() for line in str(verdict["body"]).splitlines() if line.strip()]
     found = VERDICT_LINE.fullmatch(lines[0]) if lines else None
-    return found[1] if found and found[2] == head else None
+    return found[1] if found and found[2] in reviewed else None
 
 
-def _verdict_problem(verdicts: tuple[dict[str, object], ...], head: str) -> str | None:
-    """Przyczyna odmowy z najnowszego werdyktu dla ``head`` z werdyktów w kolejności utworzenia."""
+def _verdict_problem(verdicts: tuple[dict[str, object], ...], head: str, reviewed: frozenset[str]) -> str | None:
+    """Przyczyna odmowy z najnowszego werdyktu dla ``reviewed`` (``head`` i jego treść sprzed czystych scaleń bazy) z werdyktów w kolejności utworzenia."""
 
     latest = None
     for verdict in verdicts:
-        latest = _verdict(verdict, head) or latest
+        latest = _verdict(verdict, reviewed) or latest
     if latest is None:
         return f"werdykt: brak komentarza ani recenzji „WERDYKT: PASS {head}”"
     return None if latest == "PASS" else f"werdykt: FAIL dla {head[:7]} bez nowszego „WERDYKT: PASS {head}”"
@@ -329,6 +382,32 @@ def _pull(number: int) -> Pull:
     )
 
 
+def _git(*arguments: str) -> subprocess.CompletedProcess[str]:
+    return potomne.run(["git", *arguments], cwd=ROOT, timeout=scalenia_pr.GITHUB_TIMEOUT_S)
+
+
+def reviewed_as(head: str, base: str) -> frozenset[str]:
+    """``head`` i commity, z których ``head`` powstał samymi czystymi scaleniami ``base``: werdykt każdego z nich jest werdyktem ``head``.
+
+    Idzie od ``head`` po pierwszych rodzicach, dopóki commit nie jest w ``base`` i jest czystym scaleniem bazy: ma dwóch
+    rodziców, drugi jest w ``base``, a jego drzewo to dokładnie drzewo, które ``git merge-tree`` składa z rodziców bez
+    konfliktu. Commit z własną zmianą, konflikt rozwiązany ręcznie, scalenie innej gałęzi albo rebase kończą drogę,
+    więc ich treść potrzebuje nowego werdyktu.
+    """
+
+    reviewed, commit = {head}, head
+    while _git("merge-base", "--is-ancestor", commit, base).returncode == 1:
+        parents = _git("rev-list", "--parents", "-n", "1", commit).stdout.split()[1:]
+        if len(parents) != 2 or _git("merge-base", "--is-ancestor", parents[1], base).returncode:
+            break
+        # Przy konflikcie, a także przy błędzie, merge-tree drukuje więcej niż jedno drzewo albo nic.
+        if _git("merge-tree", "--write-tree", "--no-messages", *parents).stdout.strip() != _git("rev-parse", f"{commit}^{{tree}}").stdout.strip():
+            break
+        commit = parents[0]
+        reviewed.add(commit)
+    return frozenset(reviewed)
+
+
 def _remote_base(base: str) -> str:
     listed = potomne.run(["git", "ls-remote", "origin", f"refs/heads/{base}"], cwd=ROOT, timeout=scalenia_pr.GITHUB_TIMEOUT_S)
     listed.check_returncode()
@@ -340,7 +419,7 @@ def _check(pull: Pull) -> str:
 
     checked = scalenia_pr.PullRequest(pull.number, pull.title, pull.head)
     base = scalenia_pr.fetch(pull.base, [checked])
-    problems = [*pull.problems, *filter(None, [_verdict_problem(pull.verdicts, pull.head)])]
+    problems = [*pull.problems, *filter(None, [_verdict_problem(pull.verdicts, pull.head, reviewed_as(pull.head, base))])]
     if problems:
         raise _Refused("; ".join(problems))
     where = f"{pull.base} {base[:7]}"
@@ -411,12 +490,61 @@ def _clean_up() -> str:
     return f"sprzątanie: {result or f'kod {done.returncode}'}"
 
 
-def _merge(number: int, *, merge: bool) -> int:
+def _queue(pull: Pull) -> _Queue:
+    owner, name = pull.repository.split("/")
+    query = ("api", "graphql", "-f", f"query={QUEUE_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={pull.number}")
+    found = json.loads(_gh(*query))["data"]["repository"]["pullRequest"]
+    entry, removed = found["mergeQueueEntry"], found["timelineItems"]
+    return _Queue(
+        bool(found["isMergeQueueEnabled"]),
+        str(found["id"]),
+        str(found["state"]),
+        (found["mergeCommit"] or {}).get("oid"),
+        f"{entry['state']}, pozycja {entry['position']}" if entry else None,
+        int(removed["filteredCount"]),
+        removed["nodes"][-1]["reason"] if removed["nodes"] else None,
+    )
+
+
+def _wait_in_queue(pull: Pull, removals: int, wait_s: float) -> _Queue:
+    """Stan PR, gdy kolejka go scaliła albo usunęła, a po ``wait_s`` sekundach stan, w którym nadal czeka."""
+
+    deadline = time.monotonic() + wait_s
+    while True:
+        queue = _queue(pull)
+        if queue.state == "MERGED" or queue.removals > removals or time.monotonic() >= deadline:
+            return queue
+        time.sleep(QUEUE_POLL_S)
+
+
+def _queued(pull: Pull, where: str, queue: _Queue, base: str | None, wait_s: float) -> int:
+    """Czeka na kolejkę scaleń z PR już w niej i podaje wynik: scalony, usunięty albo nadal w kolejce."""
+
+    done = _wait_in_queue(pull, queue.removals, wait_s)
+    if done.state == "MERGED":
+        closed = _close_fixed(pull, merged=True, merge_commit=done.merge_commit)
+        checked = f" (baza {base[:7]})" if base else ""
+        print(f"SCAL OK | {where} | scalony do {pull.base} przez kolejkę jako {(done.merge_commit or '?')[:7]}{checked}{closed} | {_clean_up()}")
+        return 0
+    if done.removals > queue.removals:
+        print(f"SCAL ODMOWA | {where} | kolejka scaleń usunęła PR: {done.reason or 'GitHub nie podał powodu'}")
+        return 1
+    print(
+        f"SCAL KOLEJKA | {where} | w kolejce do {pull.base}: {done.entry or 'GitHub nie podał miejsca'} po {wait_s:.0f} s czekania, "
+        f"uruchom ponownie tools/scal_pr.py {pull.number}, żeby czekać dalej"
+    )
+    return IN_QUEUE
+
+
+def _merge(number: int, *, merge: bool, wait_s: float = QUEUE_WAIT_S) -> int:
     pull = _pull(number)
     where = f"#{pull.number} {pull.head[:7]}"
+    queue = _queue(pull)
+    if queue.enabled and (queue.entry or queue.state == "MERGED") and merge:
+        return _queued(pull, where, queue, None, wait_s)
     try:
         base = _check(pull)
-        if merge and _remote_base(pull.base) != base:
+        if merge and not queue.enabled and _remote_base(pull.base) != base:
             raise _Refused(f"{pull.base} zmienił się w trakcie sprawdzania, uruchom ponownie")
     except _Refused as refusal:
         print(f"SCAL ODMOWA | {where} | {refusal}")
@@ -424,6 +552,9 @@ def _merge(number: int, *, merge: bool) -> int:
     if not merge:
         print(f"SCAL OK | {where} | gotowy do merge'a z {pull.base} {base[:7]}, bez merge'a (--bez-merge){_close_fixed(pull, merged=False, merge_commit=None)}")
         return 0
+    if queue.enabled:
+        _gh("api", "graphql", "-f", f"query={ENQUEUE}", "-f", f"id={queue.pull_id}", "-f", f"head={pull.head}")
+        return _queued(pull, where, queue, base, wait_s)
     _gh("pr", "merge", str(number), "--merge", "--match-head-commit", pull.head)
     merge_commit = _merge_commit(number)
     closed = _close_fixed(pull, merged=True, merge_commit=merge_commit)
@@ -435,9 +566,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("numer", type=int, help="Numer PR.")
     parser.add_argument("--bez-merge", action="store_true", help="Sprawdź gotowość, ale nie scalaj.")
+    parser.add_argument(
+        "--czekaj",
+        type=float,
+        default=QUEUE_WAIT_S,
+        metavar="S",
+        help=f"Ile sekund czekać na kolejkę scaleń, zanim narzędzie zostawi w niej PR (domyślnie {QUEUE_WAIT_S}).",
+    )
     args = parser.parse_args(argv)
     try:
-        return _merge(args.numer, merge=not args.bez_merge)
+        return _merge(args.numer, merge=not args.bez_merge, wait_s=args.czekaj)
     except subprocess.CalledProcessError as error:
         command = " ".join(str(part) for part in error.cmd)
         print(f"SCAL FAIL | {command}: {(error.stderr or error.stdout or '').strip()}")

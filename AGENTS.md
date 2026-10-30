@@ -23,6 +23,8 @@
   `SZYBKO OK` i `CI LOKALNIE OK` gotowości nie dają.
 - Mutacje zmienionych linii biegną nocą na `main` (ADR 0021), a każda przeżyta trafia do issue `Przeżyte mutacje z #N` (`ready-for-agent`) PR-u, który ostatni zmienił jej linię.
 - Merge PR: tylko `.venv/bin/python tools/scal_pr.py N` (Windows: `py -3 tools/scal_pr.py N`), nigdy gołe `gh pr merge`; warunki scalenia i postać werdyktów podaje jego `--help`. Zgoda to komentarz albo recenzja niezależnego recenzenta, której pierwsza linia to `WERDYKT: PASS <pełny SHA HEAD>`.
+- Werdykt zostaje ważny po czystym scaleniu `main` do gałęzi (commit scalenia bez konfliktu i bez zmian poza tym, co wniósł `main`), a zmiana treści, ręcznie rozwiązany konflikt i rebase potrzebują nowego werdyktu.
+- Gdy baza PR ma kolejkę scaleń, `scal_pr.py` wstawia do niej PR zamiast scalać i czeka na jej wynik: `SCAL KOLEJKA` (kod 2) znaczy, że PR nadal czeka, a ponowne `scal_pr.py N` czeka dalej.
 - CI i gałąź: przeczytaj [`docs/agents/pr-i-ci.md`](docs/agents/pr-i-ci.md), zanim uruchomisz lokalnie zadanie CI albo zrobisz rebase lub merge `main` do gałęzi, i gdy zadanie CI padło, status `scalenie z main` nie jest zielony, `main` jest czerwony albo chcesz sprawdzić każdy commit gałęzi.
 
 ## Reguły i co ich pilnuje
@@ -37,6 +39,7 @@ Szczegóły strażnika, jego wyjątki i granicę (co łapie tylko przegląd) opi
 | Push agenta, który wysyła HEAD, przechodzi tylko wtedy, gdy ruff i mypy dla obu systemów nie zgłaszają błędów w drzewie roboczym. | brama `tools/hooks/pre-push`, `tests/test_brama_pre_push.py` |
 | Tag Wydania `v*` i GitHub Release tworzy tylko narzędzie Wydań (#316), które ustawia `MAXIMISEART_WYDANIE=1` (ADR 0014), a agent nie robi tego ani `git push`, także z `--no-verify`, ani `gh release create`, `gh api` czy stroną GitHuba. | brama `tools/hooks/pre-push`, `tests/test_brama_pre_push.py` |
 | Opis PR ma każdy nagłówek `##` wzoru ze skilla `pr`, w jego kolejności. | `tools/scal_pr.py`, `tests/test_scal_pr.py` |
+| Werdykt commitu przechodzi na HEAD PR tylko po samych czystych scaleniach bazy, a baza z kolejką scaleń dostaje PR w kolejce, nie merge. | `tools/scal_pr.py`, `tests/test_scal_pr.py` |
 | Na własny proces agent czeka na powiadomienie `run_in_background`, a na CI rodzic przez `watch_pull_request`. | hook `PreToolUse` `tools/hooks/czekanie.py` (`.claude/settings.json`), `tests/test_czekanie.py` |
 | Agent w trybie bypass nie czeka na zgodę człowieka na polecenie Basha: gdy Claude Code by o nią zapytał (kontrola `rm`, której nie zdejmuje `permissions.allow`, albo reguła `permissions.ask`), od razu oddaje mu odmowę z poprawką, którą podaje komunikat hooka; po aktualizacji Claude Code uruchom `tools/wyrocznia_zgody.py`. | hook `PermissionRequest` `tools/hooks/zgoda.py` (`.claude/settings.json`), `tests/test_zgoda.py` |
 | Issue tego repozytorium, które opis PR wskazuje jako naprawione, zamyka się przy merge'u PR do domyślnej gałęzi, nie ręcznie: `Closes #N` zamyka GitHub, a słowa „Naprawia” GitHub nie zna, więc `tools/scal_pr.py` renderuje opis rendererem GitHuba i zamyka z komentarzem o PR i commicie merge'a issues z linków na liście numerów po „Naprawia”, które zaczyna linię akapitu albo punktu listy stojącego tylko w akapitach i listach, poza kodem i przekreśleniem, a odwołania do innego repozytorium (Zgłoszenia) zostawia. | `tools/scal_pr.py`, `tests/test_scal_pr.py` |
