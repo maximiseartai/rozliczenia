@@ -27,6 +27,22 @@ Defekt, który zmiana PR wywołuje albo ujawnia, liczy się do werdyktu także w
 Istniejące wcześniej to tylko defekt, który powtarzasz na merge-base bez tej zmiany, i do werdyktu się nie liczy.
 Styl, nazwy i formatowanie zostawiasz ruffowi, mypy i lintom frontendu.
 
+## Ważne według części repo
+
+Każda część repo, którą zmienia diff, ma swój zły skutek, który robi z defektu Ważne; przykłady to werdykty FAIL z 24–29.10.
+
+| Część | Ważne, gdy | Przykład |
+|---|---|---|
+| Zapis i odczyt skoroszytu taty (`workbook_save.py`, `template_file.py`, `template_copy.py`, `row_look.py`, `intermax_file.py`, `workbook_files.py`) | plik taty jest po zmianie zapisany albo odczytany inaczej niż na merge-base, także na kształcie prawdziwego pliku (styl wiersza, scalona komórka, format), którego fixture nie ma | #475: fixture modeluje żółty wiersz żółtymi komórkami, a prawdziwy plik ma styl wiersza, więc gałąź nie działa; #428: refaktor zatrzymuje Przebieg na pliku, który `main` rozlicza |
+| Komunikaty (katalogi z `CATALOGS` w `tests/test_komunikaty_expect.py`) | tata nie wie z Komunikatu, który plik albo folder i co ma zrobić | #480: Komunikat nie nazywa folderu miesiąca; #535: Zatrzymanie może przestać nazywać plik, a nic tego nie łapie |
+| Hooki (`tools/hooks/`) i `tools/scal_pr.py` | przepuszczają złe polecenie albo PR, albo blokują dobre | #648: `$(…)` w `${…}` przestaje zaczynać polecenie, więc hook przepuszcza czekanie na CI, któremu `main` odmawia; #624: „Naprawia” w `<summary>` zamyka issue, choć docstring mówi, że to miejsce niczego nie zamyka |
+| Sprawdzenia: testy struktury, skrypty `verify-*` i ich mutacje, `tools/plan_ci.py`, `tools/mutacje*.py`, `.github/workflows/` | sprawdzenie jest zielone bez sprawdzenia: brakująca jednostka, crash albo inny wynik niż oczekiwany przechodzi | #445: E2E i Timing mogą po cichu nie biec, a Required zostaje zielony; #667: dwie mutacje modelu kończą się `BŁĄD MODELU` zamiast `NOWE NARUSZENIE`, więc przestały cokolwiek sprawdzać |
+| Centrum rozliczeń (`src/rozliczenia/centrum/`) | serwer odpowiada spoza localhost albo bez sprawdzenia `Host`/`Origin`, albo czyta lub zapisuje plik spoza folderu okresów (ADR 0004) | w 24–29.10 bez FAIL tej klasy |
+| Dokumenty, ADR, skille, `--help` | agent albo tata, który zrobi to, co mówi zdanie, dostaje zły wynik; nieaktualne zdanie bez takiego skutku jest Drobne | #626: skill dalej podaje stary `Sync commit`, choć PR zmienia pokryty plik, więc CI czerwienieje; #378: skill mówi, że tytuły okien Excela da się odczytać bez uprawnienia Nagrywanie ekranu, a bez niego `dialogs()` uznałoby każde okno skoroszytu za dialog |
+
+Pliki generowane przez `npm run regen` w `frontend/` pomijasz: `frontend/src/api/generated/**`, `frontend/src/api/openapi.json` i `src/rozliczenia/centrum/static/**`.
+Ich świeżość sprawdza krok CI „Require the committed contract and build to be fresh”, a przeglądasz ich źródło: modele serwera i `frontend/src` poza `generated/`.
+
 ## Dowody
 
 Każde znalezisko ma plik:linia i dowód: polecenie z wynikiem, repro albo mutację z `tools/mutacje.py` (`NIEWYKRYTA` albo `WYKRYTA`).
@@ -74,7 +90,7 @@ Kto zleca przegląd, podaje numer PR i katalog biegu, w którym leży plik werdy
 1. Uruchom `.venv/bin/python tools/scal_pr.py <PR> --przeglad`.
    Drukuje pełny SHA HEAD, merge-base z bazą, `git diff --stat`, zmienione pliki, wynik `tools/skille_dla_zmiany.py` dla HEAD PR i poprzednie werdykty z ich SHA i dwiema pierwszymi liniami.
    Krok kończy się, gdy masz SHA HEAD i merge-base; poprzedni werdykt znaczy, że to kolejna runda (sekcja „Kolejne rundy”).
-2. Przejrzyj diff według sekcji „Co jest porażką” i „Dowody”, a skille z linii `SKILLE VERIFY` wykonaj według sekcji `What CI runs and what stays local` każdego z nich.
+2. Przejrzyj diff według sekcji „Co jest porażką”, „Ważne według części repo” i „Dowody”, a skille z linii `SKILLE VERIFY` wykonaj według sekcji `What CI runs and what stays local` każdego z nich.
    Każde potwierdzone znalezisko z oznaczeniem, plik:linia i dowodem od razu dopisz do pliku `runda-<k>.md` w katalogu werdyktu, żeby przerwany przegląd zostawił znaleziska.
    Krok kończy się, gdy przejrzałeś cały diff, a każde znalezisko jest w pliku.
 3. Dopisz na górę pliku dwie linie z sekcji „Postać werdyktu”, a na koniec krótko, co sprawdzone i z jakim wynikiem.
