@@ -175,7 +175,7 @@ class CentrumLog:
         self._write("skrzynka-porzucono", etykieta=label, plik=file, numer=number)
 
     def box_post_unreadable(self, *, file: str) -> None:
-        """Pliku kolejki Skrzynki Zgłoszeń nie da się odczytać (uszkodzony, nieznany schemat); zostaje. Tylko nazwa."""
+        """Pliku kolejki Skrzynki Zgłoszeń nie da się odczytać (uszkodzony, nieznany schemat, zajęty); zostaje. Tylko nazwa."""
 
         self._write("skrzynka-nieczytelny", plik=file)
 

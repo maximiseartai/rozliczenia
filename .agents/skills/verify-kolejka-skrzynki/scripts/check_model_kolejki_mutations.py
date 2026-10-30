@@ -132,10 +132,20 @@ MUTATIONS = (
     ),
     Mutation(
         "nieczytelny plik kolejki usunięty zamiast pominięty (_skip_unreadable: _remove)",
-        (Edit(MODEL, '/\\ Idz(q, "plik", "_queued: read_text rzuca OSError, _skip_unreadable pomija plik")\n',
+        (Edit(MODEL, '/\\ Idz(q, "plik", "_queued: read_text rzuca OSError, _read_failed, _skip_unreadable pomija plik")\n',
               '/\\ Idz(q, "usun", "_queued: read_text rzuca OSError, _remove")\n'),),
         _check("odczyt"),
-        "Kontrola ilości, której pliku raz nie dało się odczytać, znika bez wysyłki, choć jej znalezisko wybacza tylko Zbieganie",
+        "Kontrola ilości, której pliku raz nie dało się odczytać, znika bez wysyłki",
+        NEW,
+    ),
+    Mutation(
+        "nieodczytany plik kolejki bez budzenia RETRY_S (_send_all: _read_failed)",
+        (Edit(MODEL, "                         /\\ bladOdczytu' = Ustaw(bladOdczytu, q, TRUE)\n"
+                     '                         /\\ Idz(q, "plik", "_queued: read_text rzuca OSError',
+              "                         /\\ UNCHANGED bladOdczytu\n"
+              '                         /\\ Idz(q, "plik", "_queued: read_text rzuca OSError'),),
+        _check("odczyt"),
+        "Kontrola ilości, której pliku raz nie dało się odczytać, czeka do następnej wysyłki albo startu Centrum",
         NEW,
     ),
     Mutation(
@@ -157,11 +167,11 @@ MUTATIONS = (
             ),
             Edit(
                 MODEL,
-                "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, undeleted, rejected, lista, biez, "
-                "bezZnacznika, bezOchrony,\n                   passes, zamkniecia, nadawanie, zgubione, odmowy, "
+                "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, bladOdczytu, undeleted, rejected, lista, "
+                "biez, bezZnacznika,\n                   bezOchrony, passes, zamkniecia, nadawanie, zgubione, odmowy, "
                 "bledyPliku, wylaczenia>>\n",
-                "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, undeleted, lista, biez, "
-                "bezZnacznika, bezOchrony,\n                   passes, zamkniecia, nadawanie, zgubione, odmowy, "
+                "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, bladOdczytu, undeleted, lista, "
+                "biez, bezZnacznika,\n                   bezOchrony, passes, zamkniecia, nadawanie, zgubione, odmowy, "
                 "bledyPliku, wylaczenia>>\n"
                 '    /\\ pc\'[q] = "plik" \\/ UNCHANGED rejected\n',
             ),
@@ -180,7 +190,7 @@ MUTATIONS = (
     ),
     Mutation(
         "brak budzenia RETRY_S (_drain: clock.after)",
-        (Edit(MODEL, "            /\\ armed' = Ustaw(armed, q, armed[q] \\/ stopped[q])\n",
+        (Edit(MODEL, "            /\\ armed' = Ustaw(armed, q, armed[q] \\/ stopped[q] \\/ bladOdczytu[q])\n",
               "            /\\ UNCHANGED armed\n"),),
         _check("okres"),
         "po braku sieci wysyłka czeka do następnego startu albo następnej wysyłki",

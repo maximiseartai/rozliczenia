@@ -119,7 +119,9 @@ create none.
   `skrzynka-czeka` (cause, once per pass; for a refused content also the file
   name), `skrzynka-porzucono` (file name and issue number of a dropped comment)
   and `skrzynka-nieczytelny` (the name of a queue file
-  that is damaged or from a newer tool version; it stays and is never sent). A
+  that is damaged or from a newer tool version, which stays and is never sent,
+  or that another program holds open, which the queue tries again a minute
+  later, `RETRY_S`). A
   sent file is marked as delivered before it is removed, so a file Windows
   keeps open is not sent again. Power loss between sending and marking can
   repeat it.
