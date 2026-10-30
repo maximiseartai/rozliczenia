@@ -33,6 +33,9 @@ new version (or with a failure) or with the guardian started. Modelled by hand:
 ``stop_when_asked`` in ``server.py`` and uvicorn's graceful shutdown. After ``Shutdown.wait`` returns,
 the server may end at any moment when no HTTP request is in flight; a request that arrived before
 that is served to the end. Any other ``threading`` use in the two files stops the check as LUKA MODELU.
+Code under check that waits on something the model does not run (a real lock, a queue, a sleep) never hands
+control back; when no modelled thread does for ``--step-limit-s`` seconds, the check prints that thread, its last
+step, the schedule so far and the stack, and ends as BLOKADA SPOZA MODELU.
 
 Schedules that reach a state already explored are cut short: the code is deterministic, so a state
 (each thread's steps so far, every Uruchomienie's flags, the lock and the Events) has the same
@@ -42,13 +45,16 @@ futures every time.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import threading
 import time
+import traceback
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
+from types import FrameType, SimpleNamespace
 from typing import Any, Literal
 
 from greenlet import getcurrent, greenlet  # type: ignore[import-untyped]  # greenlet ships no type hints
@@ -66,6 +72,7 @@ from rozliczenia.progress import ProgressProjection
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 VERIFIED_FILES = ("runs.py", "shutdown.py")
+STEP_LIMIT_SECONDS = 10.0
 CLOSE_LOG = "dziennik Centrum: shutdown_requested"
 REQUESTED_SET = "Shutdown._requested.set()"
 CLOSE_TAB = "karta Zamknij"
@@ -125,14 +132,26 @@ def _current_actor() -> Actor:
     return actor
 
 
-def _code_location() -> str:
-    frame = sys._getframe(2)
+def _code_location(frame: FrameType | None) -> str:
     while frame is not None:
         name = Path(frame.f_code.co_filename).name
         if name in VERIFIED_FILES and Path(frame.f_code.co_filename).parent.name == "centrum":
             return f"{name}:{frame.f_lineno} {frame.f_code.co_name}"
-        frame = frame.f_back  # type: ignore[assignment]
+        frame = frame.f_back
     return "model"
+
+
+@dataclass
+class Turn:
+    """What the checker's one OS thread runs now; the step limit reads it from its own thread."""
+
+    scope: str = ""
+    trace: list[str] = field(default_factory=list)
+    actor: Actor | None = None
+    switches: int = 0
+
+
+TURN = Turn()
 
 
 class Scheduler:
@@ -174,7 +193,7 @@ class Scheduler:
         """Parks the calling thread until the checker picks this step; returns the picked variant."""
 
         actor = _current_actor()
-        actor.pending = Pending(call, _code_location(), enabled, variants)
+        actor.pending = Pending(call, _code_location(sys._getframe(1)), enabled, variants)
         actor.status = "parked"
         self.home.switch()
         outcome, actor.go = actor.go, None
@@ -193,7 +212,10 @@ class Scheduler:
 
         while (actor := next((actor for actor in self.actors if actor.status == "running"), None)) is not None:
             assert actor.greenlet is not None
+            TURN.actor = actor
+            TURN.switches += 1
             actor.greenlet.switch()
+        TURN.actor = None
 
     def release(self, actor: Actor, outcome: str) -> None:
         actor.status = "running"
@@ -800,6 +822,7 @@ def execute(scope: Scope, prefix: Sequence[int], visited: set[object]) -> Execut
         return index
 
     scheduler = Scheduler(trace)
+    TURN.scope, TURN.trace = scope.name, trace
     try:
         with harness(scheduler) as world:
             cut = _drive(world, scope, choose, picks, len(prefix), visited)
@@ -982,6 +1005,54 @@ def explore(scope: Scope) -> ScopeReport:
     return report
 
 
+@contextmanager
+def step_limit(seconds: float) -> Iterator[None]:
+    """Ends the process with BLOKADA SPOZA MODELU when no modelled thread hands control back for ``seconds``.
+
+    A modelled thread hands control back only at a model step, so code under check that waits on something the model
+    does not run holds the checker's one OS thread for good, and the check would hang until pytest's limit like a
+    flaky test (#27). Nothing on that thread can stop it, so one OS thread for the whole check watches the count of
+    hand-overs, waking ten times per limit: the steps do not wait for it (#565).
+    """
+
+    checker = threading.get_ident()
+    done = threading.Event()
+
+    def watch() -> None:
+        seen, since = TURN.switches, time.monotonic()
+        while not done.wait(seconds / 10):
+            if TURN.switches != seen:
+                seen, since = TURN.switches, time.monotonic()
+            elif time.monotonic() - since >= seconds:
+                print("\n".join(_blocked(seconds, sys._current_frames().get(checker))), flush=True)
+                os._exit(2)
+
+    watchdog = threading.Thread(target=watch, name="limit kroku sprawdzenia", daemon=True)
+    watchdog.start()
+    try:
+        yield
+    finally:
+        done.set()
+        watchdog.join()
+
+
+def _blocked(seconds: float, frame: FrameType | None) -> list[str]:
+    actor = TURN.actor
+    who = actor.name if actor is not None else "sprawdzenie między krokami"
+    after = f"po „{actor.history[-1]}”" if actor is not None and actor.history else "przed pierwszym krokiem"
+    return [
+        f"zakres {TURN.scope}: BLOKADA SPOZA MODELU",
+        f"  {who}: krok nie wrócił w {seconds:g} s {after}; kod stoi w [{_code_location(frame)}] i czeka na coś, "
+        "czego model nie prowadzi (prawdziwa blokada, kolejka, sen)",
+        "  harmonogram do tej chwili:",
+        *(f"    {number}. {step}" for number, step in enumerate(TURN.trace, start=1)),
+        "  stos:",
+        *(f"    {line}" for entry in traceback.format_stack(frame) for line in entry.rstrip().splitlines()),
+        "",
+        f"URUCHOMIENIA: BLOKADA SPOZA MODELU: {who}, krok nie wrócił w {seconds:g} s.",
+    ]
+
+
 # --- Report -------------------------------------------------------------------------------------------
 
 # Real defects in the current code, reported on every run until a code change fixes them: signature → why.
@@ -1060,8 +1131,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="one scope; default: all",
     )
     parser.add_argument("--strict", action="store_true", help="report known findings as violations too")
+    parser.add_argument(
+        "--step-limit-s",
+        type=float,
+        default=STEP_LIMIT_SECONDS,
+        help="seconds a modelled thread may go without handing control back before BLOKADA SPOZA MODELU; default: %(default)s",
+    )
     arguments = parser.parse_args(argv)
-    reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
+    with step_limit(arguments.step_limit_s):
+        reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
     outcome = summarize(reports, strict=arguments.strict)
     print("\n".join(outcome.lines))
     return outcome.exit_code

@@ -107,9 +107,11 @@ script checks the worktree's own `src`.
 | `URUCHOMIENIA OK, ZNANE USTALENIA: n` | 0 | Only the known findings below, each printed with its counterexample. |
 | `URUCHOMIENIA: NOWE NARUSZENIE (n)` | 1 | A rule breaks in a way not listed below, or a scope never reached a behaviour it must reach (`BRAK_ZAMKNIECIA`, `BRAK_ODMOWY_ZAMKNIECIA`, `BRAK_WYNIKU`, `BRAK_ODMOWY_STARTU`), so the check would prove nothing. |
 | `URUCHOMIENIA: LUKA MODELU (n)` | 2 | `runs.py` or `shutdown.py` uses `threading` in a way the model does not cover (for example `RLock`, `Condition`, `wait(timeout=...)`). No verdict on the rules. |
+| `URUCHOMIENIA: BLOKADA SPOZA MODELU: <thread>, krok nie wrócił w 10 s.` | 2 | Code under check waits on something the model does not run (a real lock, a queue, a sleep). No verdict on the rules. |
 
 `--scope zamknij-w-trakcie`, `--scope dwie-karty`, `--scope aktualizacja` or `--scope przywracanie` runs one scope. `--strict`
-counts known findings as violations too: use it to confirm a fix.
+counts known findings as violations too: use it to confirm a fix. `--step-limit-s` sets how long a modelled
+thread may go without handing control back before `BLOKADA SPOZA MODELU` (default 10).
 
 ## How it works and what it covers
 
@@ -175,7 +177,7 @@ Read the counterexample as a story. Each numbered line is one step:
 requests, `wątek Uruchomienie n` is the thread `RunHost.start` spawned,
 `wątek Aktualizacja n` the one `ToolUpdates.start` spawned, `serwer` is
 `stop_when_asked`, and `[runs.py:LINE function]` is the code that took the step
-(`[model]` marks a harness step). Then sort it into one of three cases:
+(`[model]` marks a harness step). Then sort it into one of these cases:
 
 - **Real bug**: the story can happen with two Centrum tabs on Dad's computer,
   and the end state breaks a rule as stated above. Report it with the story in
@@ -190,6 +192,12 @@ requests, `wątek Uruchomienie n` is the thread `RunHost.start` spawned,
   real semantics (a step per entry or signal, and a step that can go only when
   it would not block), or ask whether the code should avoid it. Never reword a
   rule or shrink a scope to make a real counterexample disappear.
+- **BLOKADA SPOZA MODELU**: the check stops itself about 10 s after a modelled thread stopped handing back
+  control, instead of hanging until pytest's 120 s limit. Above the last line you see the scope, the thread
+  (`karta Uruchom 1`), the last step it took, `[runs.py:LINE function]` where it stands, the schedule so far and
+  its stack. If the code there really waits (a deadlock outside `RunHost._lock`, a blocking call), it is a real
+  bug: report it. If it waits on a `threading` primitive the model should run, it is a model gap: handle it as
+  LUKA MODELU.
 
 ## After changing the checker or an intended change to the covered code
 
@@ -210,7 +218,8 @@ the actions after the result moved below `ended = True`,
 `Shutdown.request` without the refusal, an accepted shutdown that does not set
 `_closing`, `begin_update` without the closing or the running check, `start`
 without the updating check, `begin_restore` without the running check,
-`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`.
+`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`, and a real
+`queue.Queue().get()` in `start` gives `BLOKADA SPOZA MODELU`.
 CI runs this in the `mutations` job. A mutation reported as `NIEAKTUALNA` no longer matches its file.
 Rewrite its `anchor` and `replacement` in `check_runs_mutations.py` so it breaks
 the same rule again in the new code. Then move the sync commit forward as above.

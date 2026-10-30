@@ -111,6 +111,20 @@ MUTATIONS = (
         "URUCHOMIENIA: NOWE NARUSZENIE",
     ),
     Mutation(
+        "RunHost.start czeka na kolejkę, której model nie prowadzi",
+        (
+            Edit(
+                RUNS,
+                "    def start(self, prepared: PreparedRun[Any, Any]) -> contract.RunView:\n        with self._lock:\n",
+                "    def start(self, prepared: PreparedRun[Any, Any]) -> contract.RunView:\n"
+                "        import queue\n\n        queue.Queue().get()\n        with self._lock:\n",
+            ),
+        ),
+        (EXPLORER, "--scope", "zamknij-w-trakcie"),
+        "„Uruchom” wisi na prawdziwej blokadzie, a sprawdzenie musi to zgłosić, zanim pytest przerwie je po 120 s",
+        "URUCHOMIENIA: BLOKADA SPOZA MODELU",
+    ),
+    Mutation(
         "RLock zamiast Lock w RunHost",
         (Edit(RUNS, "        self._lock = threading.Lock()\n", "        self._lock = threading.RLock()\n"),),
         (EXPLORER, "--scope", "zamknij-w-trakcie"),

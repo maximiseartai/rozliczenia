@@ -10,6 +10,9 @@ Zakres, znane ustalenia i postępowanie przy porażce opisuje
 from __future__ import annotations
 
 import importlib.util
+import os
+import re
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -25,6 +28,19 @@ EXPLORER = (
     / "scripts"
     / "explore_runs.py"
 )
+SRC = Path(__file__).resolve().parents[1] / "src"
+
+# Prawdziwe Event, nie to z modelu: kod pod sprawdzeniem czeka na nie w RunHost.start i nigdy nie oddaje sterowania.
+BLOCKED_START = """
+import runpy, sys, threading
+sys.path.insert(0, sys.argv[1])
+from rozliczenia.centrum import runs
+def blocked(self, *_):
+    threading.Event().wait()
+runs._Run.__init__ = blocked
+sys.argv = sys.argv[2:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
 
 
 def _load_explorer() -> ModuleType:
@@ -36,12 +52,44 @@ def _load_explorer() -> ModuleType:
     return module
 
 
+def _check(*arguments: str) -> subprocess.CompletedProcess[str]:
+    """Sprawdzenie we własnym procesie: limit kroku kończy proces, więc w procesie pytest zabrałby mu raport."""
+
+    return subprocess.run(
+        [sys.executable, *arguments],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        timeout=90,
+        check=False,
+    )
+
+
 def test_centrum_prowadzi_jedno_uruchomienie_naraz_i_nie_zamyka_sie_w_trakcie_w_kazdym_przeplocie() -> None:
-    explorer = _load_explorer()
+    # Najdłuższa przerwa między krokami to 0,05 s (Mac, 2026-10-30), a całe sprawdzenie trwa ponad 2 s, więc limit kroku
+    # 2 s nie zatrzymuje zdrowego sprawdzenia, a zatrzymałby je, gdyby nie widział kroków.
+    checked = _check(str(EXPLORER), "--step-limit-s", "2")
 
-    outcome = explorer.summarize([explorer.explore(scope) for scope in explorer.SCOPES.values()])
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert checked.stdout.rstrip().splitlines()[-1] == "URUCHOMIENIA OK"
 
-    assert outcome.exit_code == 0, "\n".join(outcome.lines)
+
+def test_blokada_spoza_modelu_konczy_sprawdzenie_czytelnym_bledem_przed_limitem_pytest() -> None:
+    """Kod pod sprawdzeniem stojący na blokadzie, której model nie prowadzi, nie wygląda w CI jak flaky test (#27)."""
+
+    checked = _check("-c", BLOCKED_START, str(SRC), str(EXPLORER), "--scope", "zamknij-w-trakcie", "--step-limit-s", "2")
+
+    lines = checked.stdout.rstrip().splitlines()
+    assert checked.returncode == 2, checked.stdout + checked.stderr
+    assert lines[-1] == "URUCHOMIENIA: BLOKADA SPOZA MODELU: karta Uruchom 1, krok nie wrócił w 2 s."
+    assert re.fullmatch(
+        r"  karta Uruchom 1: krok nie wrócił w 2 s po „wejście w blokadę RunHost\._lock”; kod stoi w \[runs\.py:\d+ start\] "
+        r"i czeka na coś, czego model nie prowadzi \(prawdziwa blokada, kolejka, sen\)",
+        lines[1],
+    ), lines[1]
+    assert "    1. karta Uruchom 1: żądanie POST /api/runs dociera do serwera [model]" in lines
 
 
 def test_sprawdzenie_przeplotow_prowadzi_watki_modelu_bez_watkow_systemu(monkeypatch: pytest.MonkeyPatch) -> None:
