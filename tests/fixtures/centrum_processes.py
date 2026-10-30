@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import shutil
 import threading
+import time
 from typing import Any, Protocol, TypeVar
 
 from fastapi.testclient import TestClient
@@ -39,6 +40,7 @@ from tests.fixtures.centrum import (
     FakeReportBox,
     QUEUE_THREAD,
     RUN_LOGS_IN_BACKGROUND,
+    UPDATE_THREAD,
     MetricsPaths,
     finished_view,
     join_threads_since,
@@ -470,3 +472,26 @@ def run_logs_handled(centrum: PreparingCentrum | SettlingCentrum) -> None:
         return any(f"{entry} etykieta=logi-uruchomienia" in log for entry in ("skrzynka-wyslano", "skrzynka-czeka"))
 
     assert wait_for(handled), "wątek kolejki nie obsłużył Logów Uruchomienia"
+
+
+# Ile test czeka na każdy krok Aktualizacji narzędzia, także na pytanie do skrzynki po porażce: Git na przeciążonym
+# runnerze Windows potrafi zająć ponad 10 s (#573).
+UPDATE_WAIT_S = 30
+
+
+def tool_update_until(centrum: PreparingCentrum, reached: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
+    """Pierwszy widok Aktualizacji narzędzia, w którym ``reached``; po kroku ``restarting`` dopiero z zamkniętym Centrum.
+
+    Karta widzi ``restarting``, zanim Centrum uruchomi opiekuna ponownego startu i się zamknie, więc test, który
+    czyta prośbę w ``Surroundings.restarts`` albo wpis ``zamkniecie``, czeka też na koniec wątku aktualizacji.
+    """
+
+    deadline = time.monotonic() + UPDATE_WAIT_S
+    while True:
+        view = dict(centrum.client.get("/api/tool-update").json())
+        if reached(view):
+            if view.get("step") == "restarting":
+                join_threads_since(centrum.client.since, UPDATE_WAIT_S, named=UPDATE_THREAD)
+            return view
+        assert time.monotonic() < deadline, f"Aktualizacja narzędzia utknęła w {view}."
+        time.sleep(0.02)

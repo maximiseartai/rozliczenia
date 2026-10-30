@@ -42,7 +42,15 @@ from rozliczenia.centrum.tool_update import (
 )
 
 from tests.fixtures.centrum import NO_RELEASE, views_until
-from tests.fixtures.centrum_processes import PreparingCentrum, Surroundings, preparing_centrum, run_to_end, stopped_for_maks
+from tests.fixtures.centrum_processes import (
+    UPDATE_WAIT_S,
+    PreparingCentrum,
+    Surroundings,
+    preparing_centrum,
+    run_to_end,
+    stopped_for_maks,
+    tool_update_until,
+)
 from tests.fixtures.potomne import wait_for
 from tests.fixtures.preparation import PERIOD, incomplete_period_rows
 from tests.fixtures.tool_clone import (
@@ -73,11 +81,6 @@ def updating_centrum(
     return preparing_centrum(tmp_path, rows, surroundings=surroundings), repository
 
 
-# Ile test czeka na każdy krok Aktualizacji narzędzia, także na pytanie do skrzynki po porażce: Git na przeciążonym
-# runnerze Windows potrafi zająć ponad 10 s (#573).
-UPDATE_WAIT_S = 30
-
-
 def update_until_done(centrum: PreparingCentrum) -> dict[str, Any]:
     """Klika „Zaktualizuj narzędzie” i czeka na wynik albo na ponowny start Centrum."""
 
@@ -92,16 +95,6 @@ def update_until_result(centrum: PreparingCentrum) -> dict[str, Any]:
 
     assert centrum.client.post("/api/tool-update").status_code == 202
     return tool_update_until(centrum, lambda view: view["state"] != "running")
-
-
-def tool_update_until(centrum: PreparingCentrum, reached: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
-    deadline = time.monotonic() + UPDATE_WAIT_S
-    while True:
-        view = dict(centrum.client.get("/api/tool-update").json())
-        if reached(view):
-            return view
-        assert time.monotonic() < deadline, f"Aktualizacja narzędzia utknęła w {view}."
-        time.sleep(0.02)
 
 
 def tool_on_configuration(centrum: PreparingCentrum) -> dict[str, Any]:
