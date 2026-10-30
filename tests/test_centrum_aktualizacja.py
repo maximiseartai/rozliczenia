@@ -41,7 +41,7 @@ from rozliczenia.centrum.tool_update import (
     write_result,
 )
 
-from tests.fixtures.centrum import NO_RELEASE, views_until
+from tests.fixtures.centrum import NO_RELEASE, UPDATE_THREAD, join_threads_since, views_until
 from tests.fixtures.centrum_processes import PreparingCentrum, Surroundings, preparing_centrum, run_to_end, stopped_for_maks
 from tests.fixtures.potomne import wait_for
 from tests.fixtures.preparation import PERIOD, incomplete_period_rows
@@ -95,10 +95,19 @@ def update_until_result(centrum: PreparingCentrum) -> dict[str, Any]:
 
 
 def tool_update_until(centrum: PreparingCentrum, reached: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
+    """Widok Aktualizacji narzędzia, gdy spełni ``reached``; przy kroku „restarting” już po zamknięciu Centrum.
+
+    Karta widzi ten krok, zanim Centrum wywoła opiekuna ponownego startu i zapisze ``zamkniecie``, a prawdziwy
+    opiekun startuje nową wersję dopiero po zamknięciu poprzedniej. Bez czekania test, który gra opiekuna, nie
+    zastawał jeszcze prośby w ``restarts``.
+    """
+
     deadline = time.monotonic() + UPDATE_WAIT_S
     while True:
         view = dict(centrum.client.get("/api/tool-update").json())
         if reached(view):
+            if view.get("step") == "restarting":
+                join_threads_since(centrum.client.since, UPDATE_WAIT_S, named=UPDATE_THREAD)
             return view
         assert time.monotonic() < deadline, f"Aktualizacja narzędzia utknęła w {view}."
         time.sleep(0.02)
