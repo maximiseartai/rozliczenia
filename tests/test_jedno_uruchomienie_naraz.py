@@ -78,37 +78,48 @@ def test_sprawdzenie_przeplotow_prowadzi_watki_modelu_bez_watkow_systemu(monkeyp
 
 
 def test_kod_zawieszony_poza_modelem_daje_czytelne_zawieszenie_zamiast_limitu_pytest(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Prawdziwa blokada w kodzie pod sprawdzeniem zatrzymuje jedyny wątek systemu, na którym biegną wątki modelu.
 
     Sprawdzenie ma wtedy skończyć się raportem z nazwą wątku modelu i jego krokiem, a nie wisieć do limitu pytest,
-    który w CI wygląda jak flaky test (#6).
+    który w CI wygląda jak flaky test (#6). Gdy blokada potem puści, wątek zatrzymanego zakresu nie może już zrobić
+    kroku ani zmienić ``runs.py``, gdzie stoją wtedy prawdziwe moduły albo podmiany innego sprawdzenia.
     """
 
     explorer = _load_explorer()
     released = threading.Event()  # prawdziwe, nie z modelu
     start = runs.RunHost.start
+    touched: list[object] = []
 
     def blocked(host: runs.RunHost, prepared: runs.PreparedRun[Any, Any]) -> object:
         released.wait()
         return start(host, prepared)
 
+    def next_check(*args: object) -> None:
+        touched.append(args)
+
     monkeypatch.setattr(runs.RunHost, "start", blocked)
 
     try:
-        outcome = explorer.summarize([explorer.explore(explorer.SCOPES["zamknij-w-trakcie"])])
+        code = explorer.main(["--scope", "zamknij-w-trakcie", "--scope", "dwie-karty"])
         # Kolejne testy tego workera dostają prawdziwe threading z powrotem, choć wątek sprawdzenia nadal czeka.
         assert vars(runs)["threading"] is threading
+        # Następne sprawdzenie w tym procesie podmienia _Run po swojemu.
+        monkeypatch.setattr(runs, "_Run", next_check)
     finally:
         released.set()
 
-    assert outcome.exit_code == 3
-    assert outcome.lines[-1].startswith("URUCHOMIENIA: ZAWIESZENIE POZA MODELEM (1)")
+    assert wait_for(lambda: not any(thread.name.startswith("sprawdzenie ") for thread in threading.enumerate()))
+    assert touched == []
+    assert vars(runs)["_Run"] is next_check
+    lines = capsys.readouterr().out.splitlines()
+    assert code == 3
+    assert lines[-1].startswith("URUCHOMIENIA: ZAWIESZENIE POZA MODELEM (1)")
+    assert "niesprawdzone po zawieszeniu: zakres dwie-karty" in lines
     assert any(
         "ZAWIESZENIE POZA MODELEM: karta Uruchom 1: brak kolejnego kroku" in line
         and "„żądanie POST /api/runs dociera do serwera”" in line
         and "blocked" in line
-        for line in outcome.lines
-    ), "\n".join(outcome.lines)
-    assert wait_for(lambda: not any(thread.name.startswith("sprawdzenie ") for thread in threading.enumerate()))
+        for line in lines
+    ), "\n".join(lines)

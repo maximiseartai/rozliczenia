@@ -107,7 +107,7 @@ script checks the worktree's own `src`.
 | `URUCHOMIENIA OK, ZNANE USTALENIA: n` | 0 | Only the known findings below, each printed with its counterexample. |
 | `URUCHOMIENIA: NOWE NARUSZENIE (n)` | 1 | A rule breaks in a way not listed below, or a scope never reached a behaviour it must reach (`BRAK_ZAMKNIECIA`, `BRAK_ODMOWY_ZAMKNIECIA`, `BRAK_WYNIKU`, `BRAK_ODMOWY_STARTU`), so the check would prove nothing. |
 | `URUCHOMIENIA: LUKA MODELU (n)` | 2 | `runs.py` or `shutdown.py` uses `threading` in a way the model does not cover (for example `RLock`, `Condition`, `wait(timeout=...)`). No verdict on the rules. |
-| `URUCHOMIENIA: ZAWIESZENIE POZA MODELEM (n)` | 3 | No modelled thread took a step for 10 s: the code under check waits on something the model does not replace. The scope stops there, so there is no verdict on the rules. |
+| `URUCHOMIENIA: ZAWIESZENIE POZA MODELEM (1)` | 3 | No modelled thread took a step for 10 s: the code under check waits on something the model does not replace. The scope stops there and the later scopes are not checked (`niesprawdzone po zawieszeniu: …`), so there is no verdict on the rules. |
 
 `--scope zamknij-w-trakcie`, `--scope dwie-karty`, `--scope aktualizacja` or `--scope przywracanie` runs one scope. `--strict`
 counts known findings as violations too: use it to confirm a fix.
@@ -197,6 +197,7 @@ requests, `wątek Uruchomienie n` is the thread `RunHost.start` spawned,
 blocks, the check prints a line like `ZAWIESZENIE POZA MODELEM: karta Uruchom 2: brak kolejnego kroku przez 10 s po kroku „…”; kod czeka poza modelem w runs.py:LINE start`.
 The line names the modelled thread, its last step and its frames below the checker, innermost first, and the numbered schedule up to that point follows it.
 At that place the code takes a real lock, a sleep, a queue or a loop that no model primitive replaces, and that blocks every modelled thread at once.
+The check does not start the later scopes, because the stuck thread may still wake: it then stops at its next hand-over to the checker.
 Replace the wait by a model step in the harness, or treat it as LUKA MODELU, or ask whether the code should wait there at all.
 
 ## After changing the checker or an intended change to the covered code

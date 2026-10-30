@@ -41,6 +41,9 @@ futures every time.
 Each scope runs on one OS thread of its own, and the calling thread stops the scope as ZAWIESZENIE POZA MODELEM when no
 modelled thread takes a step for ``STEP_LIMIT_SECONDS``: the code under check then waits on something the model does
 not replace (a lock of another module, ``time.sleep``, a queue), which blocks every modelled thread at once.
+The real modules come back into ``runs.py`` and ``shutdown.py`` at once, and ``main`` checks no later scope.
+Should the wait end, the scope's thread stops at its next hand-over to the checker and leaves both files alone; the
+code under check between the wait and that hand-over runs with the real modules.
 """
 
 from __future__ import annotations
@@ -228,7 +231,14 @@ class Scheduler:
     def settle(self) -> None:
         """Runs every released or new thread up to its next step or its end."""
 
-        while (actor := next((actor for actor in self.actors if actor.status == "running"), None)) is not None:
+        while True:
+            if self.progress.stopped:
+                # Stopped as ZAWIESZENIE POZA MODELEM while a thread waited outside the model: that thread has woken,
+                # and neither it nor the checker takes another step.
+                raise Abort()
+            actor = next((actor for actor in self.actors if actor.status == "running"), None)
+            if actor is None:
+                return
             assert actor.greenlet is not None
             self.progress.steps += 1
             self.progress.running = actor
@@ -597,7 +607,9 @@ def harness(scheduler: Scheduler) -> Iterator[World]:
         world_box.append(world)
         yield world
     finally:
-        _restore(originals)
+        # A stopped scope gave the originals back already, and runs.py may hold the next scope's stand-ins by now.
+        if not scheduler.progress.stopped:
+            _restore(originals)
 
 
 def _start_tab(world: World, number: int) -> Callable[[], None]:
@@ -911,7 +923,7 @@ def _drive(
     scheduler.spawn("tata", _decision_tab(world, scope.decisions))
     scheduler.spawn("serwer", _server(world))
     try:
-        while not scheduler.gaps and not scheduler.progress.stopped:
+        while not scheduler.gaps:
             scheduler.settle()
             running = world.in_progress()
             updating = world.updating()
@@ -1041,7 +1053,7 @@ def _stuck(
 ) -> ScopeReport:
     """The scope's OS thread waits outside the model: report where, and give later checks the real modules back."""
 
-    progress.stopped = True  # should the wait ever end, the thread stops at its next step
+    progress.stopped = True  # should the wait ever end, the thread stops at its next hand-over to the checker
     assert worker.ident is not None
     where = _blocked_at(sys._current_frames().get(worker.ident))
     actor = progress.running
@@ -1068,7 +1080,7 @@ def _explore(report: ScopeReport, progress: Progress) -> None:
     visited: set[object] = set()
     started = time.perf_counter()
     prefix: list[int] | None = []
-    while prefix is not None and not progress.stopped:
+    while prefix is not None:
         execution = execute(scope, prefix, visited, progress)
         report.schedules += 1
         report.clean_closes += execution.clean_close
@@ -1119,7 +1131,7 @@ class Outcome:
         return 1 if self.new_violations or self.vacuous else 0
 
 
-def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcome:
+def summarize(reports: Sequence[ScopeReport], *, strict: bool = False, skipped: Sequence[str] = ()) -> Outcome:
     lines = [
         "Jedno Uruchomienie naraz i brak zamknięcia Centrum w trakcie pracy: sprawdzenie wyczerpujące",
         "",
@@ -1159,6 +1171,9 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
             shown[signature] = report.scope.name
             lines.extend(f"    {number}. {step}" for number, step in enumerate(trace, start=1))
         lines.append("")
+    if skipped:
+        lines.append(f"niesprawdzone po zawieszeniu: {', '.join(f'zakres {name}' for name in skipped)}")
+        lines.append("")
     if stuck:
         lines.append(
             f"URUCHOMIENIA: ZAWIESZENIE POZA MODELEM ({stuck}): kod pod sprawdzeniem czeka na coś, czego model "
@@ -1187,8 +1202,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--strict", action="store_true", help="report known findings as violations too")
     arguments = parser.parse_args(argv)
-    reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
-    outcome = summarize(reports, strict=arguments.strict)
+    names = arguments.scope or list(SCOPES)
+    reports: list[ScopeReport] = []
+    for name in names:
+        reports.append(explore(SCOPES[name]))
+        if reports[-1].stuck is not None:
+            # The stuck thread may still wake before its next hand-over, and must find no other scope's stand-ins.
+            break
+    outcome = summarize(reports, strict=arguments.strict, skipped=names[len(reports) :])
     print("\n".join(outcome.lines))
     return outcome.exit_code
 
