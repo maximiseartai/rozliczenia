@@ -705,6 +705,40 @@ def test_zgloszenie_z_polecenia_workflow_zaklada_issue_i_konczy_sie_ok(
     assert wyjscie[-1] == "MUTACJE NOCNE OK | części 1 | przeżyło 1" + (" | zadania skilli 2 | padło skryptów 1" if ze_skryptami else "")
 
 
+PUSTA_NOC = "MUTACJE NOCNE FAIL | linia main od bazy nie ma commitów, a noc bez commitów nie planuje mutacji ani skryptów skilli: zapisy są z planu innej bazy"
+
+
+@pytest.mark.parametrize(
+    ("przezyte", "skrypt", "wynik"),
+    [
+        ([_przezyta("src/a.py:1 stała")], "ok", (1, PUSTA_NOC)),
+        ([], "fail", (1, PUSTA_NOC)),
+        ([], "ok", (0, "MUTACJE NOCNE OK | części 1 | przeżyło 0 | zadania skilli 2 | padło skryptów 0")),
+    ],
+    ids=["przezyta-mutacja", "skrypt-ktory-padl", "nic-do-zgloszenia"],
+)
+def test_noc_bez_commitow_od_bazy_z_wynikiem_do_przypisania_konczy_sie_fail_a_bez_wyniku_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], przezyte: list[dict[str, object]], skrypt: str, wynik: tuple[int, str]
+) -> None:
+    repo, _ = _historia_skilli(tmp_path)
+    for modul in (mutacje_nocne, mutacje_skilli):
+        monkeypatch.setattr(modul, "ROOT", repo)
+    monkeypatch.setattr(mutacje_skilli, "SKILLS", repo / ".agents" / "skills")
+    github = GitHubWPamieci()
+    monkeypatch.setattr(mutacje_nocne, "GhApi", lambda: github)
+    zapisy = _zapisy(tmp_path / "zapisy", {1: (PRZEZYLO if przezyte else OK, przezyte)})
+    _wykonania(zapisy, {"mutacje-1": (PLAN_SKILLI.digest, {SKRYPT_A: skrypt}), "mutacje-2": (PLAN_SKILLI.digest, {SKRYPT_A: "ok", SKRYPT_B: "ok"})})
+    plan = tmp_path / "plan-skilli" / "plan.json"
+    plan.parent.mkdir()
+    plan.write_text(PLAN_SKILLI.do_json(), encoding="utf-8")
+
+    # Baza nocy to HEAD: od ostatniej udanej nocy main nie dostał commitu.
+    kod = mutacje_nocne.main(["zglos", "--baza", git(repo, "rev-parse", "HEAD"), "--zapisy", str(zapisy), "--czesci", "1", "--run", RUN, "--plan-skilli", str(plan)])
+
+    assert (kod, capsys.readouterr().out.splitlines()[-1]) == wynik
+    assert github.issues == []
+
+
 @pytest.mark.parametrize("brak", ["polecenie", "--baza", "--zapisy", "--czesci", "--run"])
 def test_zgloszenie_bez_argumentu_z_planu_nocy_konczy_sie_bledem_uzycia(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], brak: str

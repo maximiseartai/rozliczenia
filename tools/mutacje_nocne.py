@@ -21,7 +21,8 @@ Workflow ``mutacje-nocne.yml`` biegnie raz na dobę na ``main`` i ręcznie (``wo
   komentarzem, a zamknięte issue z nowymi wraca otwarte z ``ready-for-agent``.
   Część bez zapisu albo z porażką inną niż przeżyte mutacje (testy padają bez mutacji, zły wyjątek) czerwieni run po
   zgłoszeniu reszty, więc następna noc liczy od tej samej bazy. Zgłoszone mutacje się nie powtórzą, także gdy PR z
-  następnego dnia przesunie ich linie, bo klucz nie ma numerów linii.
+  następnego dnia przesunie ich linie, bo klucz nie ma numerów linii. Noc bez commitów od bazy nie planuje mutacji ani
+  skryptów skilli, więc wynik do przypisania przy takiej bazie (zapisy z planu innej bazy) też czerwieni run.
 - Skrypty mutacji skilli nocy planuje ``tools/plan_ci.py plan --zdarzenie noc --baza <baza>`` (skrypty skilli, których
   folder, runner mutacji albo sprawdzenie zmieniło się od bazy, i części każdego n podstaw z ``ci-czesci``), a zadanie
   planu wgrywa swój zapis wykonania jako artefakt ``mutacje-skilli-<id zadania>``. ``zglos --plan-skilli`` daje każdy
@@ -194,6 +195,8 @@ def _pr_z_tematu(temat: str) -> int | None:
 def _wniesienie(root: Path, linia_main: Sequence[str], commit: str) -> int:
     """Pozycja na ``linia_main`` commitu, który wniósł ``commit`` na linię pierwszych rodziców HEAD."""
 
+    if not linia_main:
+        raise ValueError("linia main od bazy nie ma commitów, a noc bez commitów nie planuje mutacji ani skryptów skilli: zapisy są z planu innej bazy")
     potomkowie = {commit, *_git(root, "rev-list", "--ancestry-path", f"{commit}..HEAD").split()}
     return next(numer for numer, kandydat in enumerate(linia_main) if kandydat in potomkowie)
 
