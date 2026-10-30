@@ -76,8 +76,8 @@ class Computer:
 
     ``outbox`` to kolejka Skrzynki ostatniego startu. Każdy kolejny start ma nowy zegar, jak nowy proces Centrum:
     budzik kolejki poprzedniego startu już nie dzwoni. Z tego samego powodu kolejny start czeka na koniec przejścia
-    kolejki poprzedniego: kolejka, która zastałaby przejście poprzedniej na tym samym folderze, oddałaby jej swoje
-    (``outbox._claimed``).
+    kolejki poprzedniego, jak na koniec starego procesu: inaczej to przejście wysyłałoby jeszcze pliki tego folderu,
+    a nowa kolejka czekałaby na nie (``outbox._claimed``).
     """
 
     tmp_path: Path

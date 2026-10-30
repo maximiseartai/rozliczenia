@@ -27,8 +27,11 @@ uzupełnia w nim odnośnik do Logów, które skrzynka przyjęła po jej zapisani
 
 from __future__ import annotations
 
+import errno
 import itertools
 import json
+import os
+import sys
 import threading
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -72,27 +75,77 @@ DELIVERY_WAIT_S: Final = 5.0
 Frame = Callable[[int, int, str], str]
 """Komentarz części ``k`` z ``n`` z jej tekstu."""
 
-# Foldery kolejki z trwającym przejściem w tym procesie i czy inna kolejka tego folderu prosi o następne. Dwie
-# kolejki jednego folderu (restart Centrum w procesie) nie wysyłają naraz: obie nie znalazłyby issue okresu, którego
-# druga jeszcze nie założyła, i założyłyby je dwa razy. Między procesami pilnuje tego port Centrum (``launcher``).
-_PASSES_LOCK: Final = threading.Lock()
-_PASSES: Final[dict[Path, bool]] = {}
+# Plik blokady w folderze kolejki: jedno przejście naraz na folder, także między procesami Centrum. Stary proces po
+# zamknięciu portu jeszcze kończy pracę (``server.py``), a jego wątek kolejki dalej wysyła, gdy nowe Centrum już
+# startuje: bez blokady oba przejścia nie znalazłyby issue okresu, którego drugie jeszcze nie założyło (#21).
+_PASS_LOCK: Final = "przejscie.lock"
 
 
-def _claimed(directory: Path) -> bool:
-    """Czy to przejście może wysyłać z ``directory``; inaczej prosi trwające przejście o następne."""
+def _claimed(directory: Path, log: CentrumLog) -> int | None:
+    """Czeka, aż żadna inna kolejka folderu ``directory`` nie przechodzi plików; deskryptor zablokowanego pliku.
 
-    with _PASSES_LOCK:
-        alone = directory not in _PASSES
-        _PASSES[directory] = not alone
-        return alone
+    Blokadę trzyma system, więc czeka też kolejka innego procesu, a koniec procesu ją zwalnia. Czekanie na przejście
+    innej kolejki trafia do dziennika. ``None``: folderu kolejki nie ma (albo to plik), więc nie ma czego wysyłać.
+    """
+
+    try:
+        descriptor = os.open(directory / _PASS_LOCK, os.O_RDWR | os.O_CREAT)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    try:
+        if not _locked(descriptor, wait=False):
+            log.box_pass_waiting()
+            _locked(descriptor, wait=True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
-def _released(directory: Path) -> bool:
-    """Kończy przejście z ``directory``; ``True``, gdy w jego trakcie inna kolejka tego folderu prosiła o następne."""
+def _locked(descriptor: int, *, wait: bool) -> bool:
+    """Blokuje plik ``descriptor``; ``wait``: aż się uda, inaczej ``False``, gdy blokadę ma ktoś inny."""
 
-    with _PASSES_LOCK:
-        return _PASSES.pop(directory)
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
+            except OSError as failure:
+                # LK_NBLCK od razu daje EACCES, a LK_LOCK EDEADLOCK po dziesięciu próbach co sekundę.
+                if failure.errno not in (errno.EACCES, errno.EDEADLOCK):
+                    raise
+                if wait:
+                    continue
+                return False
+            return True
+    import fcntl
+
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _released(descriptor: int) -> None:
+    """Zwalnia blokadę z ``_claimed`` i zamyka jej plik."""
+
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 Closed = Literal["new_issue", "reuse"]
 _LABELS: Final = frozenset(get_args(Label))
 _CLOSED: Final = frozenset(get_args(Closed))
@@ -527,16 +580,16 @@ def _waiting(outcome: Failure) -> tuple[WaitingCause, Literal["stop", "next"]]:
 class Outbox:
     """Pliki kolejki w ``directory`` i jedyny wątek, który je wysyła, także sam po porażce skrzynki.
 
-    Każdy plik ma jednego autora (``post``, nowa nazwa) i jednego czytelnika, który go oznacza i usuwa (wątek
-    ``skrzynka-kolejka``), więc pliki nie potrzebują blokady. Blokada chroni tylko to, czy wątek już biegnie, i
-    adresy dostarczonych wysyłek; zbiory nazw plików i plik ``addresses`` zna tylko ten jeden wątek.
+    Każdy plik ma jednego autora (``post``, nowa nazwa) i naraz jednego czytelnika, który go oznacza i usuwa
+    (przejście kolejki pod blokadą folderu, ``_claimed``). Blokada ``_lock`` chroni tylko to, czy wątek już biegnie, i
+    adresy dostarczonych wysyłek; zbiory nazw plików i plik ``addresses`` zna tylko wątek ``skrzynka-kolejka``.
     ``on_delivered`` dostaje każdą wysyłkę przyjętą przez skrzynkę i numer jej issue, w wątku wysyłki, zanim plik
     dostanie znacznik. ``on_rejected`` dostaje każdą wysyłkę, której treść skrzynka odrzuciła, w wątku wysyłki, zanim
     przejście pójdzie dalej. ``prepare`` dostaje wysyłkę z pliku tuż przed wysłaniem i zwraca tę, która pójdzie, albo
     ``None``: wysyłka czeka na inną i zostaje w kolejce do następnego przejścia.
 
-    Dwie kolejki jednego folderu w tym procesie nie wysyłają naraz (``_claimed``): kolejka, która zastanie przejście
-    drugiej, nie wysyła nic, a druga po swoim przejściu robi następne.
+    Dwie kolejki jednego folderu, także w dwóch procesach, nie wysyłają naraz (``_claimed``): kolejka, która zastanie
+    przejście drugiej, czeka na jego koniec i dopiero potem przechodzi pliki sama.
 
     Przejście, które stanęło na przyczynie dla całej kolejki, nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba
     że już jest nastawione; budzenie rusza wysyłkę w tle. Odrzucona treść i wysyłka czekająca w ``prepare`` budzenia
@@ -582,9 +635,12 @@ class Outbox:
         """Przy starcie Centrum: usuwa pozostałości urwanego zapisu i wysyła w tle wszystko, co czeka.
 
         Woła go ``lifespan`` przed przyjęciem pierwszego zapytania HTTP. Wysyłkę tworzy tylko zapytanie HTTP
-        (Uruchomienie albo „Wyślij” Uwagi taty), a wątek wysyłki rusza dopiero tutaj, więc żaden ``*.tmp`` nie ma
-        teraz autora: każdy został po zapisie przerwanym w poprzedniej pracy Centrum (np. utrata zasilania). Plik
-        ``.json`` obok niego, jeśli jest, ma pełną treść sprzed tego zapisu. Start nie czeka na skrzynkę: pyta ją tylko wątek w tle.
+        (Uruchomienie albo „Wyślij” Uwagi taty), a wątek wysyłki tej pracy Centrum rusza dopiero tutaj, więc żaden
+        ``*.tmp`` nie jest jej. Może go jeszcze pisać stary proces Centrum, który zamknął port i kończy pracę
+        (``server.py``): jego ``post`` zwraca wtedy ``False``, a znacznik albo numer issue jego przejścia się nie
+        zapisuje, jak przy każdym ``OSError`` zapisu. Inny ``*.tmp`` został po zapisie przerwanym w poprzedniej pracy
+        Centrum (np. utrata zasilania), a plik ``.json`` obok niego, jeśli jest, ma pełną treść sprzed tego zapisu.
+        Start nie czeka na skrzynkę ani na przejście starego procesu: czeka na nie tylko wątek w tle.
         """
 
         with suppress(OSError):
@@ -656,13 +712,12 @@ class Outbox:
     def _drain(self) -> None:
         while True:
             try:
-                if _claimed(self._directory):
+                claimed = _claimed(self._directory, self._log)
+                if claimed is not None:
                     try:
                         self._send_all()
                     finally:
-                        if _released(self._directory):
-                            with self._lock:
-                                self._again = True
+                        _released(claimed)
             except Exception as failure:
                 self._log.unexpected_failure(failure, where="wysyłka do Skrzynki Zgłoszeń")
             with self._changed:

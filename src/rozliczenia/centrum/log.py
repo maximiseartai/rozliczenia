@@ -174,6 +174,11 @@ class CentrumLog:
 
         self._write("skrzynka-porzucono", etykieta=label, plik=file, numer=number)
 
+    def box_pass_waiting(self) -> None:
+        """Przejście kolejki Skrzynki Zgłoszeń czeka na przejście innej kolejki tego folderu, np. starego procesu Centrum."""
+
+        self._write("skrzynka-zajeta")
+
     def box_post_unreadable(self, *, file: str) -> None:
         """Pliku kolejki Skrzynki Zgłoszeń nie da się odczytać (uszkodzony, nieznany schemat); zostaje. Tylko nazwa."""
 

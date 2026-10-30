@@ -2,7 +2,7 @@
 
 Each mutation removes from ``model/KolejkaSkrzynki.tla`` one guard or step whose counterpart in
 ``src/rozliczenia/centrum/outbox.py`` the mutation names, runs on its own copy of the checkout (``tools/mutacje.py``)
-and must end TLC's report with the expected line. Two mutations fix a known finding in the model and must end with
+and must end TLC's report with the expected line. One mutation fixes a known finding in the model and must end with
 ``ZNALEZISKO ZNIKNĘŁO``. A mutation whose anchor text is no longer in the model is reported as NIEAKTUALNA: update
 it to the new model.
 
@@ -51,9 +51,24 @@ MUTATIONS = (
     ),
     Mutation(
         "_claimed zawsze pozwala wysyłać",
-        (Edit(MODEL, '    /\\ IF passes[Proc(q)] = "wolny"\n', "    /\\ IF TRUE\n"),),
+        (Edit(MODEL, "    /\\ blokada = 0\n    /\\ blokada' = q\n", "    /\\ TRUE\n    /\\ blokada' = q\n"),),
         _check("dwie-kolejki"),
         "dwie kolejki jednego folderu wysyłają naraz i zakładają dwa issue okresu",
+        NEW,
+    ),
+    Mutation(
+        "blokada przejścia tylko w procesie (_claimed bez blokady pliku, jak _PASSES sprzed #21)",
+        (Edit(MODEL, "    /\\ blokada = 0\n    /\\ blokada' = q\n",
+              "    /\\ DwaProcesy \\/ blokada = 0\n    /\\ blokada' = q\n"),),
+        _check("dwa-procesy"),
+        "nowe Centrum wysyła, gdy kolejka starego procesu jeszcze wysyła, i oba zakładają issue okresu",
+        NEW,
+    ),
+    Mutation(
+        "koniec procesu nie zdejmuje blokady przejścia (blokada, której system nie zwalnia, np. sam plik)",
+        (Edit(MODEL, "    /\\ blokada' = IF blokada \\in S THEN 0 ELSE blokada\n", "    /\\ UNCHANGED blokada\n"),),
+        _check("dwa-procesy"),
+        "stary proces kończy się w trakcie przejścia, a kolejka nowego Centrum czeka na nie bez końca",
         NEW,
     ),
     Mutation(
@@ -277,14 +292,6 @@ MUTATIONS = (
         ),
         _check("zgloszenie-w-czesciach"),
         "znane znalezisko „przejecie” znika, a sprawdzenie to mówi",
-        GONE,
-    ),
-    Mutation(
-        "naprawa w modelu: nowe Centrum czeka, aż stary proces się skończy",
-        (Edit(MODEL, "    /\\ IF DwaProcesy \\/ q = 1 THEN MaPort = {} ELSE zyje[1] = \"tak\"\n",
-              "    /\\ IF DwaProcesy \\/ q = 1 THEN \\A r \\in Q : zyje[r] = \"nie\" ELSE zyje[1] = \"tak\"\n"),),
-        _check("dwa-procesy"),
-        "znane znalezisko „dwa_procesy” znika, a sprawdzenie to mówi",
         GONE,
     ),
 )

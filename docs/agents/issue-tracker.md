@@ -117,9 +117,12 @@ create none.
   404), the file waits, because the issue may still be there. The Centrum log
   records only `skrzynka-w-kolejce`, `skrzynka-wyslano` (issue number),
   `skrzynka-czeka` (cause, once per pass; for a refused content also the file
-  name), `skrzynka-porzucono` (file name and issue number of a dropped comment)
-  and `skrzynka-nieczytelny` (the name of a queue file
-  that is damaged or from a newer tool version; it stays and is never sent). A
+  name), `skrzynka-porzucono` (file name and issue number of a dropped comment),
+  `skrzynka-nieczytelny` (the name of a queue file
+  that is damaged or from a newer tool version; it stays and is never sent)
+  and `skrzynka-zajeta` (a pass waits for the pass of another Centrum process,
+  e.g. one that closed its port and still ends, so one Kontrola never opens two
+  issues). A
   sent file is marked as delivered before it is removed, so a file Windows
   keeps open is not sent again. Power loss between sending and marking can
   repeat it.
