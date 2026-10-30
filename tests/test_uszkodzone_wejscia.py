@@ -11,7 +11,7 @@ Wejścia to operacje kontraktu Centrum; operacja spoza macierzy ma w ``NOT_SWEPT
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import cached_property
 from datetime import date, datetime
@@ -36,8 +36,18 @@ from rozliczenia.centrum.log import CentrumLog
 from rozliczenia.centrum.report_box import GitHubReportBox, HttpRequest, HttpResponse
 from rozliczenia.centrum.shutdown import Shutdown
 
-from tests.fixtures.centrum import CENTRUM, FakeGitHub, FakeOneDrive, FakePlatform, MetricsPaths, finished_view
+from tests.fixtures.centrum import (
+    CENTRUM,
+    FakeGitHub,
+    FakeOneDrive,
+    FakePlatform,
+    MetricsPaths,
+    finished_view,
+    join_threads_since,
+    new_line,
+)
 from tests.fixtures.centrum_processes import Engines
+from tests.fixtures.clock import ManualClock
 from tests.fixtures.preparation import PERIOD, write_collective_template, write_internal_template, write_register
 from tests.fixtures.settlement import CellValue, write_quantity_source, write_template
 
@@ -212,6 +222,8 @@ class World:
         platform = FakePlatform(
             chosen_files=[self.path("rejestr")] * 2, chosen_folders=[self.path("folder_okresow")] * 2
         )
+        # Zegar stoi: Skrzynka bez sieci nastawia ponowienie kolejki na nim, a nie prawdziwy budzik co RETRY_S.
+        clock = ManualClock()
         return create_app(
             settings_path=self.path("ustawienia"),
             platform=platform,
@@ -230,6 +242,8 @@ class World:
             report_box=GitHubReportBox(transport=_offline_like_urllib),
             intermax_copies=self.root / "Kopie INTERMAX",
             now=lambda: NOW,
+            clock=clock,
+            pause=clock.pause,
         )
 
     def client(self) -> TestClient:
@@ -516,6 +530,18 @@ def _known(entry: str, damage: str, name: str) -> tuple[pytest.MarkDecorator, ..
     if reason is None or datetime.now().astimezone().date() > KNOWN_UNTIL:
         return ()
     return (pytest.mark.xfail(strict=True, reason=reason),)
+
+
+@pytest.fixture(autouse=True)
+def bez_watkow_centrum_po_tescie() -> Iterator[None]:
+    """Po teście nie żyje żaden wątek, który test uruchomił, także budzik i przejście kolejki Skrzynki (#22).
+
+    Budzik kolejki z prawdziwym zegarem żyje dłużej, niż ``join_threads_since`` czeka, więc test z nim pada.
+    """
+
+    since = new_line()
+    yield
+    join_threads_since(since)
 
 
 @pytest.fixture(scope="session")
