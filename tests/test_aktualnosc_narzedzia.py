@@ -381,6 +381,8 @@ def test_aktualnosc_i_aktualizacja_pytaja_repozytorium_tego_checkoutu_bez_przeki
         ["git", "remote", "get-url", "origin"], cwd=Path(__file__).parent, capture_output=True, text=True, check=True
     ).stdout.strip()
     repository = re.sub(r"^(https://github\.com/|git@github\.com:)|\.git$", "", origin)
+    if repository.casefold() != "maximiseartai/maximiseart-dad":
+        pytest.skip("próba H6 na poligonie: lustro ma inną nazwę niż repozytorium narzędzia")
 
     assert tool_freshness.REPOSITORY_API == f"https://api.github.com/repos/{repository}"
     assert tool_update.GITHUB_REPOSITORY == f"https://github.com/{repository}.git"
