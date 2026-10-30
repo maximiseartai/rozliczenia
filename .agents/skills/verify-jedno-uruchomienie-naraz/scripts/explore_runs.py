@@ -37,14 +37,20 @@ that is served to the end. Any other ``threading`` use in the two files stops th
 Schedules that reach a state already explored are cut short: the code is deterministic, so a state
 (each thread's steps so far, every Uruchomienie's flags, the lock and the Events) has the same
 futures every time.
+
+The modelled threads share one OS thread, so code that blocks for real outside the model steps (a real lock, sleep or
+wait) stops the whole check. The caller's thread watches it and, after ``STEP_TIMEOUT_SECONDS`` without a step, ends
+the scope as BLOKADA SPOZA MODELU with the modelled thread, its last step and the stack where it stands.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+import traceback
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +72,9 @@ from rozliczenia.progress import ProgressProjection
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 VERIFIED_FILES = ("runs.py", "shutdown.py")
+# Ten seconds without a step is no busy runner: all four scopes together took 15 s on a busy Mac.
+STEP_TIMEOUT_SECONDS = 10.0
+CHECKER_THREAD = "sprawdzenie przeplotów"
 CLOSE_LOG = "dziennik Centrum: shutdown_requested"
 REQUESTED_SET = "Shutdown._requested.set()"
 CLOSE_TAB = "karta Zamknij"
@@ -86,6 +95,10 @@ class Abort(BaseException):
 
 class ModelGap(BaseException):
     """The real code used ``threading`` in a way the model primitives do not cover."""
+
+
+class Abandoned(BaseException):
+    """The caller stopped waiting for this check (a step stood still, Ctrl+C or pytest's limit)."""
 
 
 # --- Scheduler: one modelled thread runs at a time, from one step to the next ------------------------
@@ -118,6 +131,16 @@ class Actor:
 _ABORT = "\0abort"
 
 
+@dataclass
+class Progress:
+    """How far the checker's thread has got, read by the thread that waits for it."""
+
+    switches: int = 0
+    actor: Actor | None = None  # the modelled thread taking its step now; None while the checker picks the next one
+    trace: list[str] = field(default_factory=list)  # the schedule being run
+    abandoned: bool = False  # the caller stopped waiting: the checker stops after the current step
+
+
 def _current_actor() -> Actor:
     actor: Actor | None = getattr(getcurrent(), "actor", None)
     if actor is None:
@@ -136,11 +159,13 @@ def _code_location() -> str:
 
 
 class Scheduler:
-    def __init__(self, trace: list[str]) -> None:
+    def __init__(self, trace: list[str], progress: Progress) -> None:
         self.home = getcurrent()  # the checker, which picks every step
         self.actors: list[Actor] = []
         self.trace = trace
         self.gaps: list[str] = []
+        self.progress = progress
+        progress.trace = trace
 
     def spawn(self, name: str, body: Callable[[], None], run: Any = None) -> Actor:
         """Adds a thread that runs up to its first step at the next ``settle``."""
@@ -191,9 +216,15 @@ class Scheduler:
     def settle(self) -> None:
         """Runs every released or new thread up to its next step or its end."""
 
+        progress = self.progress
         while (actor := next((actor for actor in self.actors if actor.status == "running"), None)) is not None:
             assert actor.greenlet is not None
+            progress.switches += 1
+            progress.actor = actor
             actor.greenlet.switch()
+            progress.actor = None
+            if progress.abandoned:
+                raise Abandoned()
 
     def release(self, actor: Actor, outcome: str) -> None:
         actor.status = "running"
@@ -471,6 +502,10 @@ class World:
         return "przed sprawdzeniem odmowy"
 
 
+# What the harness replaces in the verified modules for one schedule.
+PATCHED = ((runs, "threading"), (shutdown, "threading"), (runs, "run_process"), (runs, "_Run"))
+
+
 @contextmanager
 def harness(scheduler: Scheduler) -> Iterator[World]:
     events: list[ModelEvent] = []
@@ -509,14 +544,14 @@ def harness(scheduler: Scheduler) -> Iterator[World]:
                 raise ModelGap("Zatrzymanie w Stops.ended; model kończy każde Uruchomienie sukcesem")
 
     # Each verified file sees its own stand-ins; the originals come back after the schedule.
-    patches = [
-        (runs, "threading", ModelThreading(scheduler, "runs.py", "RunHost._lock", "_Run._decided", events)),
-        (shutdown, "threading", ModelThreading(scheduler, "shutdown.py", "Shutdown", "Shutdown._requested", events)),
-        (runs, "run_process", engine),
-        (runs, "_Run", TrackedRun),
-    ]
-    originals = [(module, name, getattr(module, name)) for module, name, _ in patches]
-    for module, name, value in patches:
+    stand_ins = (
+        ModelThreading(scheduler, "runs.py", "RunHost._lock", "_Run._decided", events),
+        ModelThreading(scheduler, "shutdown.py", "Shutdown", "Shutdown._requested", events),
+        engine,
+        TrackedRun,
+    )
+    originals = [(module, name, getattr(module, name)) for module, name in PATCHED]
+    for (module, name), value in zip(PATCHED, stand_ins, strict=True):
         setattr(module, name, value)
     try:
         log = LogSteps(scheduler)
@@ -788,7 +823,7 @@ def _state(world: World) -> object:
     )
 
 
-def execute(scope: Scope, prefix: Sequence[int], visited: set[object]) -> Execution:
+def execute(scope: Scope, prefix: Sequence[int], visited: set[object], progress: Progress) -> Execution:
     picks: list[int] = []
     widths: list[int] = []
     trace: list[str] = []
@@ -799,7 +834,7 @@ def execute(scope: Scope, prefix: Sequence[int], visited: set[object]) -> Execut
         widths.append(count)
         return index
 
-    scheduler = Scheduler(trace)
+    scheduler = Scheduler(trace, progress)
     try:
         with harness(scheduler) as world:
             cut = _drive(world, scope, choose, picks, len(prefix), visited)
@@ -906,9 +941,19 @@ def next_prefix(execution: Execution) -> list[int] | None:
     return None
 
 
+@dataclass(frozen=True)
+class Stall:
+    """A step of the code under check that did not come back to the model within ``STEP_TIMEOUT_SECONDS``."""
+
+    text: str
+    trace: list[str]
+    stack: list[str]
+
+
 @dataclass
 class ScopeReport:
     scope: Scope
+    stall: Stall | None = None
     schedules: int = 0
     states: int = 0
     seconds: float = 0.0
@@ -951,12 +996,75 @@ class ScopeReport:
 
 
 def explore(scope: Scope) -> ScopeReport:
+    """Explores one scope on the checker's own OS thread, or reports the step that stood still there.
+
+    Every modelled thread is a greenlet on that one thread, so a real block outside the model steps stops all of
+    them, and only another thread can notice it.
+    """
+
+    progress = Progress()
+    reports: list[ScopeReport] = []
+    failures: list[BaseException] = []
+
+    def check() -> None:
+        try:
+            reports.append(_explore(scope, progress))
+        except Abandoned:
+            pass
+        except BaseException as failure:  # noqa: BLE001 - raised again in the caller's thread
+            failures.append(failure)
+
+    originals = [(module, name, getattr(module, name)) for module, name in PATCHED]
+    checker = threading.Thread(target=check, name=CHECKER_THREAD, daemon=True)
+    checker.start()
+    try:
+        stall = _watch(checker, progress)
+    finally:
+        progress.abandoned = checker.is_alive()
+    if stall is not None:
+        # The stuck thread never reaches the harness's own restore, and the rest of this process needs the real code.
+        for module, name, value in originals:
+            setattr(module, name, value)
+        return ScopeReport(scope, stall=stall)
+    if failures:
+        raise failures[0]
+    return reports[0]
+
+
+def _watch(checker: threading.Thread, progress: Progress) -> Stall | None:
+    """Waits for the checker's thread to end; the step it stands in once it has taken none for the time limit."""
+
+    switches, since = progress.switches, time.monotonic()
+    while checker.is_alive():
+        checker.join(STEP_TIMEOUT_SECONDS / 4)
+        if progress.switches != switches:
+            switches, since = progress.switches, time.monotonic()
+        elif checker.is_alive() and time.monotonic() - since >= STEP_TIMEOUT_SECONDS:
+            return _stall(checker, progress)
+    return None
+
+
+def _stall(checker: threading.Thread, progress: Progress) -> Stall:
+    actor = progress.actor
+    who = f"„{actor.name}”" if actor is not None else "sprawdzenie poza wątkami modelu"
+    after = f"po kroku „{actor.history[-1]}”" if actor is not None and actor.history else "przed pierwszym krokiem"
+    assert checker.ident is not None
+    frame = sys._current_frames().get(checker.ident)
+    stack = [line for entry in traceback.format_stack(frame) for line in entry.rstrip("\n").splitlines()] if frame else []
+    return Stall(
+        f"{who} stoi {after} dłużej niż {STEP_TIMEOUT_SECONDS:g} s w kodzie poza krokami modelu",
+        list(progress.trace),
+        stack,
+    )
+
+
+def _explore(scope: Scope, progress: Progress) -> ScopeReport:
     report = ScopeReport(scope)
     visited: set[object] = set()
     started = time.perf_counter()
     prefix: list[int] | None = []
     while prefix is not None:
-        execution = execute(scope, prefix, visited)
+        execution = execute(scope, prefix, visited, progress)
         report.schedules += 1
         report.clean_closes += execution.clean_close
         report.closes_refused += execution.close_refused
@@ -982,6 +1090,20 @@ def explore(scope: Scope) -> ScopeReport:
     return report
 
 
+def explore_scopes(scopes: Iterable[Scope]) -> list[ScopeReport]:
+    """Explores the scopes in order, up to the first that stood still.
+
+    Its stuck thread may still wake up and put the real code back under the next scope's stand-ins.
+    """
+
+    reports: list[ScopeReport] = []
+    for scope in scopes:
+        reports.append(explore(scope))
+        if reports[-1].stall is not None:
+            break
+    return reports
+
+
 # --- Report -------------------------------------------------------------------------------------------
 
 # Real defects in the current code, reported on every run until a code change fixes them: signature → why.
@@ -996,10 +1118,11 @@ class Outcome:
     gaps: int
     vacuous: int
     lines: list[str]
+    stalls: int = 0
 
     @property
     def exit_code(self) -> int:
-        if self.gaps:
+        if self.gaps or self.stalls:
             return 2
         return 1 if self.new_violations or self.vacuous else 0
 
@@ -1009,10 +1132,18 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
         "Jedno Uruchomienie naraz i brak zamknięcia Centrum w trakcie pracy: sprawdzenie wyczerpujące",
         "",
     ]
-    new = known = gaps = vacuous = 0
+    new = known = gaps = vacuous = stalls = 0
     shown: dict[tuple[object, ...], str] = {}
     for report in reports:
         lines.append(f"zakres {report.scope.name}: {report.scope.describe()}")
+        if report.stall is not None:
+            stalls += 1
+            lines.append(f"  BLOKADA SPOZA MODELU: {report.stall.text}")
+            lines.extend(f"    {number}. {step}" for number, step in enumerate(report.stall.trace, start=1))
+            lines.append("    stos wątku sprawdzenia:")
+            lines.extend(f"      {line}" for line in report.stall.stack)
+            lines.append("")
+            continue
         lines.append(
             f"  harmonogramy: {report.schedules}, różne stany: {report.states}, "
             f"zamknięcia bez trwającego Uruchomienia: {report.clean_closes}, czas: {report.seconds:.1f} s"
@@ -1038,7 +1169,12 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
             shown[signature] = report.scope.name
             lines.extend(f"    {number}. {step}" for number, step in enumerate(trace, start=1))
         lines.append("")
-    if gaps:
+    if stalls:
+        lines.append(
+            f"URUCHOMIENIA: BLOKADA SPOZA MODELU ({stalls}): krok kodu nie wrócił do modelu w {STEP_TIMEOUT_SECONDS:g} s, "
+            "więc sprawdzenie nie orzeka o regułach."
+        )
+    elif gaps:
         lines.append(f"URUCHOMIENIA: LUKA MODELU ({gaps}): kod używa threading w sposób, którego model nie obejmuje.")
     elif new or vacuous:
         lines.append(f"URUCHOMIENIA: NOWE NARUSZENIE ({new + vacuous})")
@@ -1046,7 +1182,7 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
         lines.append(f"URUCHOMIENIA OK, ZNANE USTALENIA: {known}")
     else:
         lines.append("URUCHOMIENIA OK")
-    return Outcome(new, known, gaps, vacuous, lines)
+    return Outcome(new, known, gaps, vacuous, lines, stalls)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1061,7 +1197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--strict", action="store_true", help="report known findings as violations too")
     arguments = parser.parse_args(argv)
-    reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
+    reports = explore_scopes(SCOPES[name] for name in (arguments.scope or SCOPES))
     outcome = summarize(reports, strict=arguments.strict)
     print("\n".join(outcome.lines))
     return outcome.exit_code

@@ -111,6 +111,19 @@ MUTATIONS = (
         "URUCHOMIENIA: NOWE NARUSZENIE",
     ),
     Mutation(
+        "prawdziwa blokada spoza modelu w RunHost.start",
+        (
+            Edit(
+                RUNS,
+                "            run = _Run(self, prepared, self._stops)\n",
+                "            __import__(\"threading\").Event().wait()\n            run = _Run(self, prepared, self._stops)\n",
+            ),
+        ),
+        (EXPLORER, "--scope", "zamknij-w-trakcie"),
+        "„Uruchom” wisi na zawsze, a sprawdzenie bez strażnika kroku wisiałoby do limitu pytest jak flaky test",
+        "URUCHOMIENIA: BLOKADA SPOZA MODELU",
+    ),
+    Mutation(
         "RLock zamiast Lock w RunHost",
         (Edit(RUNS, "        self._lock = threading.Lock()\n", "        self._lock = threading.RLock()\n"),),
         (EXPLORER, "--scope", "zamknij-w-trakcie"),

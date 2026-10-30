@@ -107,6 +107,7 @@ script checks the worktree's own `src`.
 | `URUCHOMIENIA OK, ZNANE USTALENIA: n` | 0 | Only the known findings below, each printed with its counterexample. |
 | `URUCHOMIENIA: NOWE NARUSZENIE (n)` | 1 | A rule breaks in a way not listed below, or a scope never reached a behaviour it must reach (`BRAK_ZAMKNIECIA`, `BRAK_ODMOWY_ZAMKNIECIA`, `BRAK_WYNIKU`, `BRAK_ODMOWY_STARTU`), so the check would prove nothing. |
 | `URUCHOMIENIA: LUKA MODELU (n)` | 2 | `runs.py` or `shutdown.py` uses `threading` in a way the model does not cover (for example `RLock`, `Condition`, `wait(timeout=...)`). No verdict on the rules. |
+| `URUCHOMIENIA: BLOKADA SPOZA MODELU (1)` | 2 | A step of the code under check did not come back to the model within 10 s (`STEP_TIMEOUT_SECONDS`): it blocks for real outside the model steps. The check stops at that scope. No verdict on the rules. |
 
 `--scope zamknij-w-trakcie`, `--scope dwie-karty`, `--scope aktualizacja` or `--scope przywracanie` runs one scope. `--strict`
 counts known findings as violations too: use it to confirm a fix.
@@ -117,7 +118,10 @@ The script runs the real `RunHost` and `Shutdown`, wired as in `create_app`, in
 modelled threads. FastAPI runs the sync handlers `startRun`, `decideRun` and `closeCentrum`
 in a thread pool, so tabs really do run in parallel. Each modelled thread is a
 greenlet on the script's one OS thread, so a busy CI runner slows the check only by
-its share of a CPU, not by a kernel thread switch at every step (#565). Inside `runs.py` and
+its share of a CPU, not by a kernel thread switch at every step (#565). That thread
+explores one scope; the thread that started it waits, and when no modelled thread has
+taken a step for 10 s, it ends the scope as `BLOKADA SPOZA MODELU` instead of hanging
+until pytest's 120 s limit. Inside `runs.py` and
 `shutdown.py`, `threading` is replaced by model primitives: entering
 `RunHost._lock`, each `Event.set`/`clear`/`wait` and starting the Uruchomienie
 thread is one indivisible step, as is each Centrum log entry and
@@ -186,6 +190,14 @@ requests, `wątek Uruchomienie n` is the thread `RunHost.start` spawned,
   such as a request arriving after uvicorn stopped accepting, or a thread
   passing a lock another thread holds. Fix the model primitives or the actors in
   `explore_runs.py`, then rerun the mutations below.
+- **BLOKADA SPOZA MODELU**: the report names the modelled thread (for example
+  `„karta Uruchom 1”`), the last step it took, the schedule up to that step and the
+  stack of the check's thread, whose last lines are the call that blocks. A real
+  `threading` primitive that `runs.py` or `shutdown.py` reaches past the module
+  attribute, a lock of another module held across a step, a sleep or a network call
+  all look like this. Treat a block the real Centrum would also reach (a deadlock, a
+  wait nothing ends) as a real bug; a primitive the model should replace as a
+  LUKA MODELU.
 - **LUKA MODELU**: model the new `threading` use in `ModelThreading` with its
   real semantics (a step per entry or signal, and a step that can go only when
   it would not block), or ask whether the code should avoid it. Never reword a
@@ -197,7 +209,7 @@ CI proves the check can still fail: the night on `main` runs the script below af
 change of this skill's folder. Run it locally only to reproduce a red Mutation checks step
 or the night's issue, or after you rewrite a mutation. It applies broken variants to a temporary copy
 of `src`, never to the checkout, each in the one scope that catches it (about
-45 s on a Mac):
+1 min on a Mac, 10 s of it the block that waits for its time limit):
 
 ```powershell
 py -3 .agents\skills\verify-jedno-uruchomienie-naraz\scripts\check_runs_mutations.py
@@ -210,7 +222,8 @@ the actions after the result moved below `ended = True`,
 `Shutdown.request` without the refusal, an accepted shutdown that does not set
 `_closing`, `begin_update` without the closing or the running check, `start`
 without the updating check, `begin_restore` without the running check,
-`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`.
+`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`,
+and a real `threading.Event().wait()` in `RunHost.start` gives `BLOKADA SPOZA MODELU` after 10 s.
 CI runs this in the `mutations` job. A mutation reported as `NIEAKTUALNA` no longer matches its file.
 Rewrite its `anchor` and `replacement` in `check_runs_mutations.py` so it breaks
 the same rule again in the new code. Then move the sync commit forward as above.
