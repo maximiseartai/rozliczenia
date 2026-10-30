@@ -36,8 +36,19 @@ from rozliczenia.centrum.log import CentrumLog
 from rozliczenia.centrum.report_box import GitHubReportBox, HttpRequest, HttpResponse
 from rozliczenia.centrum.shutdown import Shutdown
 
-from tests.fixtures.centrum import CENTRUM, FakeGitHub, FakeOneDrive, FakePlatform, MetricsPaths, finished_view
+from tests.fixtures.centrum import (
+    CENTRUM,
+    FakeGitHub,
+    FakeOneDrive,
+    FakePlatform,
+    MetricsPaths,
+    finished_view,
+    join_threads_since,
+    new_line,
+    threads_since,
+)
 from tests.fixtures.centrum_processes import Engines
+from tests.fixtures.clock import ManualClock
 from tests.fixtures.preparation import PERIOD, write_collective_template, write_internal_template, write_register
 from tests.fixtures.settlement import CellValue, write_quantity_source, write_template
 
@@ -212,11 +223,15 @@ class World:
         platform = FakePlatform(
             chosen_files=[self.path("rejestr")] * 2, chosen_folders=[self.path("folder_okresow")] * 2
         )
+        # Zegar stoi, więc kolejka Skrzynki, która bez sieci staje, nie nastawia prawdziwego budzika.
+        clock = ManualClock()
         return create_app(
             settings_path=self.path("ustawienia"),
             platform=platform,
             log=log,
             shutdown=Shutdown(log),
+            clock=clock,
+            pause=clock.pause,
             today=lambda: TODAY,
             configuration_files=ConfigurationFiles(
                 worker_config=self.path("konfiguracja_wykonawcow"),
@@ -563,6 +578,20 @@ def test_macierz_obejmuje_kazda_operacje_kontraktu_centrum(tmp_path: Path) -> No
 
     assert operations - swept - NOT_SWEPT.keys() == set(), "dodaj wejście do ENTRIES albo powód do NOT_SWEPT"
     assert (swept | NOT_SWEPT.keys()) - operations == set(), "ENTRIES albo NOT_SWEPT ma operację spoza kontraktu"
+
+
+def test_centrum_swiata_taty_bez_sieci_nie_zostawia_w_procesie_budzika_kolejki_skrzynki(
+    world_template: Path, tmp_path: Path
+) -> None:
+    world = World(tmp_path / "swiat")
+    shutil.copytree(world_template, world.root)
+    since = new_line()
+
+    # Logi Uruchomienia czekają w kolejce Skrzynki, która bez sieci staje i nastawia ponowienie.
+    assert ENTRIES["podglad[przebieg]"].call(_remembering_choices(world), []) == []
+    join_threads_since(since, named="skrzynka-kolejka")
+
+    assert threads_since(since, named="budzik") == []
 
 
 @pytest.mark.parametrize(
