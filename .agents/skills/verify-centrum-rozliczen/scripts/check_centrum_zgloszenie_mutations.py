@@ -34,7 +34,7 @@ MUTATIONS = (
         (
             Edit(
                 OUTBOX,
-                "                    if self._stopped_on is not None and not self._retry_armed:\n",
+                "                    if (busy or self._stopped_on is not None) and not self._retry_armed:\n",
                 "                    if False:\n",
             ),
         ),

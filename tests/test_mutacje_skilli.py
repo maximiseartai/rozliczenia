@@ -440,6 +440,31 @@ def test_nazwy_mutacji_w_tabeli_kazdego_skryptu_skilla_sa_rozne(monkeypatch: pyt
     assert {script: sorted(set(found)) for script, found in names.items()} == {script: sorted(found) for script, found in names.items()}
 
 
+def test_kotwica_kazdej_mutacji_skilla_trafia_w_swoj_plik_dokladnie_raz(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skrypt mutacji na PR nie biegnie, więc kotwica zgubiona przez zmianę kodu wyszłaby dopiero nocą jako NIEAKTUALNA.
+
+    Kotwice jednej mutacji idą po kolei, jak w ``tools/mutacje.py``: każda trafia w plik po poprzednich zmianach,
+    a plik, którego nie ma, jest pusty.
+    """
+
+    tool = _load_tool(monkeypatch)
+    scripts = sorted((ROOT / ".agents" / "skills").glob(f"*/scripts/{tool.PATTERN}"))
+    stale = []
+    for script in scripts:
+        for mutation in tool._mutations(script):
+            texts: dict[Path, str] = {}
+            for edit in mutation.edits:
+                path = ROOT / edit.file
+                code = texts.get(path, path.read_text(encoding="utf-8") if path.is_file() else "")
+                if code.count(edit.anchor) != 1:
+                    stale.append(f"{script.parents[1].name}: {mutation.name} → {edit.file.as_posix()}")
+                    break
+                texts[path] = code.replace(edit.anchor, edit.replacement)
+
+    assert scripts
+    assert stale == [], "przepisz kotwicę na obecny kod i sprawdź mutację przez tools/mutacje.py"
+
+
 def _load_copy(root: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Kopia narzędzia w ``root`` wczytana jako moduł, więc widzi tylko skille ``root``."""
 

@@ -102,9 +102,10 @@ STRUCTURE = (
     "tests/test_uszkodzone_wejscia.py::test_macierz_obejmuje_kazda_operacje_kontraktu_centrum",
     "tests/test_wycofane_pojecia.py",
     "tests/test_wywolanie_skryptow_skilli.py::test_skrypty_skilli_biora_katalog_runu_warianty_i_sciezki_tylko_z_parsera",
-    # Globy ``pilnuje:`` z frontmatteru SKILL.md obejmują całe repozytorium, a graf ich nie widzi.
+    # Globy ``pilnuje:`` z frontmatteru SKILL.md i kotwice mutacji skilli obejmują całe repozytorium, a graf ich nie widzi.
     "tests/test_mutacje_skilli.py::test_kazdy_glob_pilnuje_trafia_w_plik_repozytorium",
     "tests/test_mutacje_skilli.py::test_kazdy_modul_silnika_jest_w_pilnuje_verify_rozliczenia_albo_na_liscie_wylaczen",
+    "tests/test_mutacje_skilli.py::test_kotwica_kazdej_mutacji_skilla_trafia_w_swoj_plik_dokladnie_raz",
     "tests/test_skille_dla_zmiany.py::test_frontmatter_kazdego_skilla_jest_poprawnym_yaml",
     "tests/test_skille_dla_zmiany.py::test_workflow_skilla_windows_biegnie_dla_tych_samych_sciezek_co_jego_pilnuje",
     # Plan bramki liczy graf zależności całego repozytorium, więc test, który zaczyna zależeć od wszystkiego, rośnie
