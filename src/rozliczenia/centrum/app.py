@@ -26,7 +26,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from rozliczenia.centrum.clock import SYSTEM_CLOCK, Clock
+from rozliczenia.centrum.clock import Clock
 from rozliczenia.centrum.cloud_files import CloudFiles
 from rozliczenia.centrum.configuration import CONFIGURATION_WAIT_S, ConfigurationFiles, configuration_router
 from rozliczenia.centrum.contract import Health, Problem, Refusal
@@ -84,7 +84,7 @@ def create_app(
     tool_freshness: ToolFreshness | None = None,
     cloud_files: CloudFiles | None = None,
     report_box: ReportBox | None = None,
-    clock: Clock = SYSTEM_CLOCK,
+    clock: Clock,
     pause: Callable[[float], None] = time.sleep,
     report_search_deadline_s: float = SEARCH_DEADLINE_S,
     tool_update: ToolClone | None = None,

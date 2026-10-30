@@ -12,7 +12,7 @@ Wejścia to operacje kontraktu Centrum; operacja spoza macierzy ma w ``NOT_SWEPT
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from datetime import date, datetime
 import json
@@ -36,7 +36,19 @@ from rozliczenia.centrum.log import CentrumLog
 from rozliczenia.centrum.report_box import GitHubReportBox, HttpRequest, HttpResponse
 from rozliczenia.centrum.shutdown import Shutdown
 
-from tests.fixtures.centrum import CENTRUM, FakeGitHub, FakeOneDrive, FakePlatform, MetricsPaths, finished_view
+from tests.fixtures.centrum import (
+    CENTRUM,
+    QUEUE_THREAD,
+    FakeGitHub,
+    FakeOneDrive,
+    FakePlatform,
+    MetricsPaths,
+    finished_view,
+    join_threads_since,
+    new_line,
+    threads_since,
+)
+from tests.fixtures.clock import ManualClock
 from tests.fixtures.centrum_processes import Engines
 from tests.fixtures.preparation import PERIOD, write_collective_template, write_internal_template, write_register
 from tests.fixtures.settlement import CellValue, write_quantity_source, write_template
@@ -194,6 +206,8 @@ DAMAGES: dict[str, tuple[tuple[str, ...], Callable[[Path], None]]] = {
 @dataclass
 class World:
     root: Path
+    # Zegar stoi, więc ponowienie kolejki Skrzynki bez sieci nie zostawia w workerze budzika.
+    clock: ManualClock = field(default_factory=ManualClock)
 
     def path(self, name: str) -> Path:
         return self.root / FILES[name][0]
@@ -228,6 +242,8 @@ class World:
             tool_freshness=FakeGitHub().freshness(),
             cloud_files=FakeOneDrive().cloud_files(),
             report_box=GitHubReportBox(transport=_offline_like_urllib),
+            clock=self.clock,
+            pause=self.clock.pause,
             intermax_copies=self.root / "Kopie INTERMAX",
             now=lambda: NOW,
         )
@@ -554,6 +570,21 @@ def test_uszkodzony_plik_nie_konczy_sie_ogolnym_komunikatem(
         ]
 
     assert problems == []
+
+
+def test_centrum_swiata_bez_sieci_nie_zostawia_budzika_ani_watku_kolejki_skrzynki(
+    world_template: Path, tmp_path: Path
+) -> None:
+    world = World(tmp_path / "swiat")
+    shutil.copytree(world_template, world.root)
+    since = new_line()
+
+    sent = _remembering_choices(world).post("/api/dad-notes", json=DAD_NOTE)
+    join_threads_since(since, named=QUEUE_THREAD)
+
+    assert sent.json() == {"state": "waiting", "waits_for": "internet"}
+    assert threads_since(since, named="budzik") == []
+    assert world.clock.wakes == 1  # ponowienie wysyłki czeka na zegarze testu
 
 
 def test_macierz_obejmuje_kazda_operacje_kontraktu_centrum(tmp_path: Path) -> None:

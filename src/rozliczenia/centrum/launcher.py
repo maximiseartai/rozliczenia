@@ -127,6 +127,7 @@ def _start(
 
     try:
         from rozliczenia.centrum.app import create_app
+        from rozliczenia.centrum.clock import SYSTEM_CLOCK
         from rozliczenia.centrum.platform import system_platform
         from rozliczenia.centrum.server import serve
         from rozliczenia.settings import default_settings_path
@@ -140,7 +141,9 @@ def _start(
         open_tab(address)
 
     shutdown = Shutdown(log)
-    app = create_app(settings_path=default_settings_path(), platform=system_platform(), log=log, shutdown=shutdown)
+    app = create_app(
+        settings_path=default_settings_path(), platform=system_platform(), log=log, shutdown=shutdown, clock=SYSTEM_CLOCK
+    )
     return serve(app, listener=listener, on_ready=announce, shutdown=shutdown, log=log)
 
 
