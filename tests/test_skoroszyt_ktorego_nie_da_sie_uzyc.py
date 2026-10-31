@@ -23,6 +23,7 @@ from rozliczenia.engine import run_settlements
 from rozliczenia.message import StopError
 
 from tests.fixtures.centrum import CENTRUM, FakeGitHub, FakePlatform
+from tests.fixtures.clock import ManualClock
 from tests.fixtures.preparation import (
     make_preparation_fixture,
     run_preparation,
@@ -138,6 +139,7 @@ def test_konfiguracja_pokazuje_niedostepny_wzorzec_i_wzorzec_z_danymi_jako_niecz
         platform=FakePlatform(),
         log=log,
         shutdown=Shutdown(log),
+        clock=ManualClock(),
         configuration_files=files,
         tool_freshness=FakeGitHub().freshness(),
     )

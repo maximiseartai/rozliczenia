@@ -17,6 +17,7 @@ from typing import Any, get_args
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rozliczenia.centrum.app import create_app
+from rozliczenia.centrum.clock import SYSTEM_CLOCK
 from rozliczenia.centrum.contract import ApiOperation
 from rozliczenia.centrum.log import CentrumLog
 from rozliczenia.centrum.platform import FileTypes
@@ -84,6 +85,7 @@ def main() -> int:
         platform=_NoPlatform(),
         log=log,
         shutdown=Shutdown(log),
+        clock=SYSTEM_CLOCK,
     )
     contract = _sorted(app.openapi())
     operations = {operation["operationId"] for path in contract["paths"].values() for operation in path.values()}

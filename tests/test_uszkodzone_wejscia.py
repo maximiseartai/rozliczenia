@@ -11,7 +11,7 @@ Wejścia to operacje kontraktu Centrum; operacja spoza macierzy ma w ``NOT_SWEPT
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import cached_property
 from datetime import date, datetime
@@ -36,8 +36,20 @@ from rozliczenia.centrum.log import CentrumLog
 from rozliczenia.centrum.report_box import GitHubReportBox, HttpRequest, HttpResponse
 from rozliczenia.centrum.shutdown import Shutdown
 
-from tests.fixtures.centrum import CENTRUM, FakeGitHub, FakeOneDrive, FakePlatform, MetricsPaths, finished_view
+from tests.fixtures.centrum import (
+    CENTRUM,
+    QUEUE_THREAD,
+    FakeGitHub,
+    FakeOneDrive,
+    FakePlatform,
+    MetricsPaths,
+    finished_view,
+    join_threads_since,
+    new_line,
+    threads_since,
+)
 from tests.fixtures.centrum_processes import Engines
+from tests.fixtures.clock import ManualClock
 from tests.fixtures.preparation import PERIOD, write_collective_template, write_internal_template, write_register
 from tests.fixtures.settlement import CellValue, write_quantity_source, write_template
 
@@ -217,6 +229,7 @@ class World:
             platform=platform,
             log=log,
             shutdown=Shutdown(log),
+            clock=ManualClock(),
             today=lambda: TODAY,
             configuration_files=ConfigurationFiles(
                 worker_config=self.path("konfiguracja_wykonawcow"),
@@ -516,6 +529,20 @@ def _known(entry: str, damage: str, name: str) -> tuple[pytest.MarkDecorator, ..
     if reason is None or datetime.now().astimezone().date() > KNOWN_UNTIL:
         return ()
     return (pytest.mark.xfail(strict=True, reason=reason),)
+
+
+@pytest.fixture(autouse=True)
+def centrum_nie_zostawia_budzika_skrzynki() -> Iterator[None]:
+    """Centrum testu nie zostawia w workerze budzika ani wątku kolejki Skrzynki, które żyłyby do końca sesji.
+
+    Skrzynka bez sieci staje i nastawia ponowienie za ``RETRY_S``; na zegarze systemu to wątek ``budzik``, który co
+    minutę uruchamia następne przejście kolejki, więc przeszkadza testom innych plików w tym samym workerze.
+    """
+
+    since = new_line()
+    yield
+    join_threads_since(since, named=QUEUE_THREAD)
+    assert [thread.name for thread in threads_since(since, named="budzik")] == []
 
 
 @pytest.fixture(scope="session")
