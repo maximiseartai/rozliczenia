@@ -82,7 +82,8 @@ def test_blokada_spoza_modelu_konczy_sprawdzenie_bledem_z_watkiem_i_krokiem_zami
     """Kod pod sprawdzeniem zatrzymany na prawdziwej blokadzie nie wygląda w CI jak flaky test (#91).
 
     Bez limitu kroku sprawdzenie wisiało do limitu 120 s pytest, tak jak przy flaky teście z #565. Gdy blokada
-    kiedyś puści, porzucone sprawdzenie staje na następnym kroku zamiast badać dalsze harmonogramy w tle.
+    kiedyś puści, porzucone sprawdzenie staje na następnym kroku zamiast badać dalsze harmonogramy w tle, a moduły
+    Centrum od razu wracają do prawdziwego ``threading``, żeby następne testy w tym workerze go nie dzieliły.
     """
 
     explorer = _load_explorer()
@@ -99,6 +100,7 @@ def test_blokada_spoza_modelu_konczy_sprawdzenie_bledem_z_watkiem_i_krokiem_zami
     try:
         with pytest.raises(explorer.Hang) as hang:
             explorer.explore(explorer.SCOPES["zamknij-w-trakcie"], step_limit=2)
+        assert runs.threading is threading
     finally:
         released.set()
 

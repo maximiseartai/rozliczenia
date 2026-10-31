@@ -156,6 +156,12 @@ class Watch:
     steps: int = 0
     running: Actor | None = None
     abandoned: bool = False
+    patched: list[tuple[Any, str, Any]] = field(default_factory=list)  # (module, name, original) while patched
+
+    def restore(self) -> None:
+        for module, name, value in self.patched:
+            setattr(module, name, value)
+        self.patched = []
 
 
 class Scheduler:
@@ -542,7 +548,7 @@ def harness(scheduler: Scheduler) -> Iterator[World]:
         (runs, "run_process", engine),
         (runs, "_Run", TrackedRun),
     ]
-    originals = [(module, name, getattr(module, name)) for module, name, _ in patches]
+    scheduler.watch.patched = [(module, name, getattr(module, name)) for module, name, _ in patches]
     for module, name, value in patches:
         setattr(module, name, value)
     try:
@@ -571,8 +577,7 @@ def harness(scheduler: Scheduler) -> Iterator[World]:
         world_box.append(world)
         yield world
     finally:
-        for module, name, value in originals:
-            setattr(module, name, value)
+        scheduler.watch.restore()
 
 
 def _start_tab(world: World, number: int) -> Callable[[], None]:
@@ -980,8 +985,8 @@ class ScopeReport:
 def explore(scope: Scope, *, step_limit: float = STEP_LIMIT_SECONDS) -> ScopeReport:
     """Every schedule of ``scope`` on one checker thread; ``Hang`` when no step comes within ``step_limit``.
 
-    After ``Hang`` the checker thread stays blocked where the code under check blocks, with ``runs.py`` and
-    ``shutdown.py`` still patched; if it ever returns, it stops at its next step.
+    After ``Hang`` or an interruption of the caller, ``runs.py`` and ``shutdown.py`` get their originals back at
+    once, and the checker thread stops at its next step, if its blocked code ever returns.
     """
 
     watch = Watch()
@@ -997,13 +1002,17 @@ def explore(scope: Scope, *, step_limit: float = STEP_LIMIT_SECONDS) -> ScopeRep
     checker = threading.Thread(target=check, name=f"sprawdzenie przeplotów {scope.name}", daemon=True)
     checker.start()
     steps, since = watch.steps, time.monotonic()
-    while checker.is_alive():
-        checker.join(step_limit / 10)
-        if watch.steps != steps:
-            steps, since = watch.steps, time.monotonic()
-        elif checker.is_alive() and time.monotonic() - since >= step_limit:
+    try:
+        while checker.is_alive():
+            checker.join(step_limit / 10)
+            if watch.steps != steps:
+                steps, since = watch.steps, time.monotonic()
+            elif checker.is_alive() and time.monotonic() - since >= step_limit:
+                raise Hang(_hang(checker, watch.running, step_limit))
+    finally:
+        if checker.is_alive():
             watch.abandoned = True
-            raise Hang(_hang(checker, watch.running, step_limit))
+            watch.restore()
     if failures:
         raise failures[0]
     return reports[0]
@@ -1028,7 +1037,7 @@ def _explore(scope: Scope, watch: Watch) -> ScopeReport:
     visited: set[object] = set()
     started = time.perf_counter()
     prefix: list[int] | None = []
-    while prefix is not None and not watch.abandoned:
+    while prefix is not None:
         execution = execute(scope, prefix, visited, watch)
         report.schedules += 1
         report.clean_closes += execution.clean_close
