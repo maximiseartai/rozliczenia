@@ -101,6 +101,10 @@ class Hang(Exception):
     """No modelled thread reached its next step within the step limit: the code blocks outside the model."""
 
 
+class Abandoned(Exception):
+    """The caller gave up on the check, so the checker thread must not patch ``runs.py`` and ``shutdown.py`` again."""
+
+
 # --- Scheduler: one modelled thread runs at a time, from one step to the next ------------------------
 #
 # Each modelled thread is a greenlet on the checker's own OS thread. With an OS thread each, every step was a
@@ -157,11 +161,27 @@ class Watch:
     running: Actor | None = None
     abandoned: bool = False
     patched: list[tuple[Any, str, Any]] = field(default_factory=list)  # (module, name, original) while patched
+    # Patching and abandoning take turns, so no schedule patches the modules after the caller restored them.
+    _patching: threading.Lock = field(default_factory=threading.Lock)
+
+    def patch(self, patches: Sequence[tuple[Any, str, Any]]) -> None:
+        with self._patching:
+            if self.abandoned:
+                raise Abandoned()
+            self.patched = [(module, name, getattr(module, name)) for module, name, _ in patches]
+            for module, name, value in patches:
+                setattr(module, name, value)
 
     def restore(self) -> None:
-        for module, name, value in self.patched:
-            setattr(module, name, value)
-        self.patched = []
+        with self._patching:
+            for module, name, value in self.patched:
+                setattr(module, name, value)
+            self.patched = []
+
+    def abandon(self) -> None:
+        with self._patching:
+            self.abandoned = True
+        self.restore()
 
 
 class Scheduler:
@@ -548,9 +568,7 @@ def harness(scheduler: Scheduler) -> Iterator[World]:
         (runs, "run_process", engine),
         (runs, "_Run", TrackedRun),
     ]
-    scheduler.watch.patched = [(module, name, getattr(module, name)) for module, name, _ in patches]
-    for module, name, value in patches:
-        setattr(module, name, value)
+    scheduler.watch.patch(patches)
     try:
         log = LogSteps(scheduler)
         # Wired as in create_app (app.py): RunHost, then Shutdown.refuse_while(runs.shutdown_refusal).
@@ -986,7 +1004,8 @@ def explore(scope: Scope, *, step_limit: float = STEP_LIMIT_SECONDS) -> ScopeRep
     """Every schedule of ``scope`` on one checker thread; ``Hang`` when no step comes within ``step_limit``.
 
     After ``Hang`` or an interruption of the caller, ``runs.py`` and ``shutdown.py`` get their originals back at
-    once, and the checker thread stops at its next step, if its blocked code ever returns.
+    once, and the checker thread stops at its next step, if its blocked code ever returns, without starting
+    another schedule.
     """
 
     watch = Watch()
@@ -1011,8 +1030,7 @@ def explore(scope: Scope, *, step_limit: float = STEP_LIMIT_SECONDS) -> ScopeRep
                 raise Hang(_hang(checker, watch.running, step_limit))
     finally:
         if checker.is_alive():
-            watch.abandoned = True
-            watch.restore()
+            watch.abandon()
     if failures:
         raise failures[0]
     return reports[0]
