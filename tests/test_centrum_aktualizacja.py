@@ -84,7 +84,30 @@ def update_until_done(centrum: PreparingCentrum) -> dict[str, Any]:
     started = centrum.client.post("/api/tool-update")
     assert started.status_code == 202, started.json()
     assert started.json() == {"state": "running", "step": "fetching"}
-    return tool_update_until(centrum, lambda view: view["state"] != "running" or view["step"] == "restarting")
+    return result_or_restart(centrum)
+
+
+def result_or_restart(centrum: PreparingCentrum) -> dict[str, Any]:
+    """Czeka na wynik trwającej aktualizacji albo na ponowny start Centrum.
+
+    Ponowny start to krok ``restarting`` i zamknięcie Centrum: karta widzi ten krok, zanim Centrum uruchomi opiekuna
+    ponownego startu i się zamknie, a opiekun startuje nową wersję dopiero po zwolnieniu portu (#76).
+    """
+
+    view = tool_update_until(centrum, lambda view: view["state"] != "running" or view["step"] == "restarting")
+    if view["state"] == "running":
+        assert wait_for(lambda: closed_for_update(centrum), UPDATE_WAIT_S), (
+            f"Centrum nie zamknęło się po kroku „restarting”, dziennik: {centrum.log_path.read_text(encoding='utf-8')}"
+        )
+    return view
+
+
+def closed_for_update(centrum: PreparingCentrum) -> bool:
+    """Czy Centrum zamknęło się dla opiekuna ponownego startu po ostatnim kliknięciu „Zaktualizuj narzędzie”."""
+
+    events = log_events(centrum)
+    last_click = len(events) - events[::-1].index("aktualizacja-start")
+    return "zamkniecie" in events[last_click:]
 
 
 def update_until_result(centrum: PreparingCentrum) -> dict[str, Any]:
@@ -765,7 +788,7 @@ def test_nowe_biblioteki_karta_widzi_krok_instalowania_a_dziennik_zapisuje_insta
 
     installing = tool_update_until(centrum, lambda view: view.get("step") == "installing")
     hold.set()
-    view = tool_update_until(centrum, lambda view: view.get("step") == "restarting")
+    view = result_or_restart(centrum)
 
     assert installing == {"state": "running", "step": "installing"}
     assert view == {"state": "running", "step": "restarting"}
