@@ -659,6 +659,38 @@ def test_czesc_podstawy_skilla_bez_pilnuje_ktorego_folder_sie_nie_zmienil_trafia
     assert [issue["title"] for issue in github.issues] == ["Przeżyte mutacje skilli z #26"]
     assert f"SKRYPT {podstawa}\n" in github.issues[0]["body"]
 
+@pytest.mark.parametrize("co_padlo", ["skrypt-skilla", "przezyta-mutacja"])
+def test_noc_bez_commitow_od_bazy_ze_skryptem_ktory_padl_albo_przezyta_mutacja_konczy_sie_fail_z_przyczyna(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], co_padlo: str
+) -> None:
+    repo, _ = _historia_skilli(tmp_path)
+    for modul in (mutacje_nocne, mutacje_skilli):
+        monkeypatch.setattr(modul, "ROOT", repo)
+    monkeypatch.setattr(mutacje_skilli, "SKILLS", repo / ".agents" / "skills")
+    monkeypatch.setattr(mutacje_nocne, "GhApi", GitHubWPamieci)
+    podstawa = ".agents/skills/verify-d/scripts/sprawdz_d.py"
+    (repo / podstawa).parent.mkdir(parents=True)
+    (repo / podstawa).write_text("", encoding="utf-8")
+    (repo / ".agents/skills/verify-d/SKILL.md").write_text(f"---\nname: verify-d\nci: {podstawa}\nci-czesci: 2\n---\n", encoding="utf-8")
+    baza = commit(repo, "Dodaj verify-d (#24)")
+    klucz = "skill:verify-d/ci"
+    # Skill bez pilnuje biegnie nocą także wtedy, gdy od bazy nic się nie zmieniło.
+    assert klucz in {f"skill:{krok.key}" for krok, _ in mutacje_skilli.wybor(frozenset(), night=True).chosen}
+    plan = plan_ci.Plan(plan_ci.NOC, 225.0, (), (plan_ci.Zadanie("mutacje-1", "mutacje", "Mutation checks (1/1)", (f"{klucz}#1/2", f"{klucz}#2/2"), 100.0),))
+    (tmp_path / "plan.json").write_text(plan.do_json(), encoding="utf-8")
+    zapisy = _wykonania(tmp_path / "zapisy", {"mutacje-1": (plan.digest, {klucz: "fail" if co_padlo == "skrypt-skilla" else "ok"})})
+    przezyte = [_przezyta("src/a.py:1 stała")] if co_padlo == "przezyta-mutacja" else []
+    _zapisy(zapisy, {1: (PRZEZYLO if przezyte else OK, przezyte)})
+
+    kod = mutacje_nocne.main(["zglos", "--baza", baza, "--zapisy", str(zapisy), "--czesci", "1", "--run", RUN, "--plan-skilli", str(tmp_path / "plan.json")])
+
+    przyczyna = {
+        "skrypt-skilla": f"skrypty padły, a noc od bazy {baza} nie ma commitu, któremu je przypisać: {podstawa}",
+        "przezyta-mutacja": f"commit {git(repo, 'log', '-1', '--format=%H', '--', 'src/a.py')} nie wszedł na linię pierwszych rodziców HEAD od bazy nocy, więc nie ma PR-u nocy",
+    }[co_padlo]
+    assert (kod, capsys.readouterr().out.splitlines()[-1]) == (1, f"MUTACJE NOCNE FAIL | {przyczyna}")
+
+
 def test_zadanie_skilli_bez_zapisu_tego_planu_albo_bez_wyniku_jednostki_czerwieni_przebieg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

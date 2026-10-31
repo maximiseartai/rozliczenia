@@ -14,6 +14,7 @@
 - Skrypt mutacji skilla na PR nie biegnie, bo mierzy jakość sprawdzenia skilla, a nie zmianę (ADR 0021).
   Biegnie w pełnym CI `main` i nocą na `main` (`mutacje-nocne.yml`), gdy od ostatniej udanej nocy zmienił się plik w folderze skilla, runner mutacji (`tools/mutacje.py`, `tools/mutacje_skilli.py`) albo sprawdzenie, które uruchamiają jego mutacje.
   Skrypt, który padł nocą, trafia linią `SKRYPT <skrypt>` do issue `Przeżyte mutacje skilli z #N` z etykietą `ready-for-agent` PR-u, który ostatni zmienił folder skilla.
+  Noc bez commitów od bazy nie ma takiego PR-u, a skill bez czytelnego `pilnuje:` biegnie i wtedy, więc jego skrypt, który padł, czerwieni przebieg z przyczyną.
 - Zmiana `requirements.txt`, `.github/workflows/ci.yml` albo `.gitattributes` uruchamia każdy krok każdego skilla, a skill bez czytelnego `pilnuje:` biegnie przy każdej zmianie.
 - Importów ani plików, które krok czyta, wybór nie liczy, więc to, czego `pilnuje:` nie obejmuje, łapie dopiero pełne CI `main`, na którym biegnie każdy krok.
 - Glob, który wymienia moduły z nazwy, nie obejmuje nowego modułu, więc nowy moduł silnika dopisz do `pilnuje:`, które obejmuje też `tools/uruchom_proces.py`, albo z powodem do `POZA_VERIFY_ROZLICZENIA` w `tests/test_mutacje_skilli.py`.
