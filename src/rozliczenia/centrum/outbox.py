@@ -510,8 +510,9 @@ class Outbox:
 
     Przejście, które stanęło na przyczynie dla całej kolejki albo pominęło plik, którego nie dało się odczytać
     (``OSError``), nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba że już jest nastawione; budzenie rusza
-    wysyłkę w tle. Odrzucona treść, uszkodzony plik i wysyłka czekająca w ``prepare`` budzenia nie nastawiają:
-    ponowienie im nie pomoże. Linia „skrzynka-czeka” trafia do dziennika tylko przy zmianie przyczyny
+    wysyłkę w tle; plik, którego odczyt pada stale (np. bez prawa odczytu), budzi tak kolejkę do końca pracy
+    Centrum. Odrzucona treść, uszkodzony plik i wysyłka czekająca w ``prepare`` budzenia nie nastawiają: ponowienie im
+    nie pomoże. Linia „skrzynka-czeka” trafia do dziennika tylko przy zmianie przyczyny
     (zeruje ją każde dostarczenie i przejście do końca), bo budzenie co minutę zapełniłoby ostatnie wpisy, które niesie
     Diagnoza.
     """

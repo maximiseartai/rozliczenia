@@ -509,23 +509,24 @@ def test_zapis_urwany_przez_utrate_zasilania_znika_przy_starcie_i_nie_jest_wysyl
 
 
 @pytest.mark.parametrize(
-    "text",
+    "content",
     [
-        "{",
-        "[]",
-        '{"schema_version": 2}',
-        post(["x"]).to_json().replace('"schema_version": 2', '"schema_version": 3'),
-        post(["x"]).to_json().replace('"kontrola-ilosci"', '"inna-etykieta"'),
+        b"{",
+        b"[]",
+        b'{"schema_version": 2}',
+        post(["x"]).to_json().replace('"schema_version": 2', '"schema_version": 3').encode(),
+        post(["x"]).to_json().replace('"kontrola-ilosci"', '"inna-etykieta"').encode(),
+        post(["zażółć"]).to_json().encode("cp1250"),
     ],
-    ids=["urwany", "nie-obiekt", "bez-celu", "nowszy-schemat", "nieznana-etykieta"],
+    ids=["urwany", "nie-obiekt", "bez-celu", "nowszy-schemat", "nieznana-etykieta", "nie-utf8"],
 )
 def test_plik_kolejki_ktorego_nie_da_sie_odczytac_zostaje_z_jednym_wpisem_i_nie_wstrzymuje_innych(
-    tmp_path: Path, text: str
+    tmp_path: Path, content: bytes
 ) -> None:
     queue = Queue(tmp_path, FakeReportBox())
     queue.directory.mkdir(parents=True)
     broken = "00000000T000000000000Z-0001-kontrola-ilosci-3f2a9c1b.json"
-    (queue.directory / broken).write_text(text, encoding="utf-8")
+    (queue.directory / broken).write_bytes(content)
 
     queue.outbox.post(post(["treść\n"]))
     assert queue.box.wait_until(lambda box: len(box.issues) == 1)
