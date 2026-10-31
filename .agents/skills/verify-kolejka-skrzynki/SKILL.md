@@ -69,7 +69,7 @@ step of this code that the checker can fail, lose or kill:
 | the delivery marker | `Outbox._send_all`: `replace_atomically(path, _queue_text(post, delivered_parts=len(post.parts)))` in `suppress(OSError)` |
 | the removal of a queue file | `Outbox._remove` (`path.unlink`, `_undeleted`) |
 | a pass of the queue | `Outbox._drain` (`_claimed`, `_send_all`, `_released`), run only when the real `Outbox.send_in_background` starts the queue thread (called by `Outbox.post`, `Outbox.resume` and `Outbox._woken`); the checker replaces only `threading.Thread` in `outbox.py`, which hands it the target |
-| the `RETRY_S` wake | `Outbox._drain`: `self._clock.after(RETRY_S, self._woken)` when `_stopped_on` is set and no wake is armed; the checker calls an armed wake when nothing else asked for a pass, and a restart drops it with its process |
+| the `RETRY_S` wake | `Outbox._drain`: `self._clock.after(RETRY_S, self._woken)` when `_stopped_on` or `_read_failed` is set and no wake is armed; the checker calls an armed wake when nothing else asked for a pass, and a restart drops it with its process |
 | a restart of Centrum | a new `Outbox` and `KeyedBox` on the same folder, then `Outbox.resume` |
 
 Covered files: `src/rozliczenia/centrum/outbox.py`,
@@ -172,7 +172,8 @@ out and why.
 Not covered: a key that is missing or refused (`NoKey`, `Refused`: the pass
 stops, nothing is sent, and `KeyedBox` keeps a refusal for `REFUSED_KEPT_S`),
 content the Skrzynka rejects (`Rejected`: the file waits for the next start,
-and the same content would be rejected again), Maks closing or deleting an
+and the same content would be rejected again), a queue file that cannot be read
+(`_queued`, `_read_failed`), Maks closing or deleting an
 issue (`Gone`, `closed="reuse"`), a part posted twice (after a lost comment
 answer or a restart, accepted as at least once and not a rule here), a
 delivered file with its marker that waits for the next start, two queues on one folder (`_claimed`), a
@@ -183,7 +184,8 @@ end), `on_delivered` (Sprawy taty), and
 more wysyłki or failures than the bounds above. The TLA+ model below checks, on its
 own abstraction of this code, two queues on one folder, a process killed in
 the middle of `replace_atomically`, a queue thread running at the same time
-as `post`, refused content and two file errors in a row.
+as `post`, refused content, a queue file that cannot be read and two file
+errors in a row.
 
 ## Known findings
 
@@ -342,8 +344,8 @@ The comment above each action and branch in the model names the same code.
 | --- | --- |
 | `Start` | `app.py` `lifespan` → `outbox.py` `Outbox.resume`: unlink every `*.tmp`, then `send_in_background`. Only a process with the port starts (`launcher.py` `listen_locally`); a second queue of one process starts while the first runs |
 | `Nadaj` | `outbox.py` `Outbox.post`: the name from the moment and `next(self._sequence)`, `replace_atomically` (`write_text` of `.json.tmp`, then `replace`; `OSError` → `False`, also the `FileNotFoundError` of `replace` when `resume` of a new process removed the `.tmp`), then `send_in_background` |
-| `Petla` | `Outbox._drain`: `_claimed` (taken → ask for another pass and skip `_send_all`), then `sorted(glob("*.json"))` in `_send_all` |
-| `Plik` | `Outbox._send_all` for one file: `_undeleted` → `_remove`, `_rejected` → skip, `_queued` (an `OSError` or a missing file → `_skip_unreadable`), `delivered` → `_remove`, else `_deliver`; the end of the list sets `_stopped_on = None` |
+| `Petla` | `Outbox._drain`: `_claimed` (taken → ask for another pass and skip `_send_all`), then `_read_failed = False` and `sorted(glob("*.json"))` in `_send_all` |
+| `Plik` | `Outbox._send_all` for one file: `_undeleted` → `_remove`, `_rejected` → skip, `_queued` (an `OSError` or a missing file → `_read_failed = True` and `_skip_unreadable`), `delivered` → `_remove`, else `_deliver`; the end of the list sets `_stopped_on = None` |
 | `Szukaj` | `keyed_box.py` `KeyedBox.labelled_issues` / `find_issue` (`report_box.py` `newest_with_line`) in `_deliver_to_period`, `_deliver_report` (a found Zgłoszenie is `Delivered(found, ())`), `_deliver_to_known` |
 | `Zaloz` | `KeyedBox.open_issue` in `_deliver_new_issue`, `_deliver_report`, `_deliver_to_period`, with `Post.opening` |
 | `Komentuj` | `KeyedBox.comment` in `_comment_all`, one part per step; the first failure ends the wysyłka |
@@ -351,7 +353,7 @@ The comment above each action and branch in the model names the same code.
 | `Znacznik`, `Zamiana` | `_send_all` after `Delivered`: `_stopped_on = None`, then the marker in `suppress(OSError)`: `atomic_file.py` `replace_atomically` (`write_text` of `.json.tmp`, then `replace`; an `OSError` unlinks the `.tmp`) |
 | `Usun` | `Outbox._remove`: `unlink(missing_ok=True)`, an `OSError` adds the name to `_undeleted` |
 | `Zwolnij` | `Outbox._drain` `finally`: `_released`; a request of the other queue sets `_again` |
-| `Decyzja` | `Outbox._drain` under `_changed`: `_again` → another pass, else `_draining = False` and `clock.after(RETRY_S, _woken)` when `_stopped_on` is set and no wake is armed |
+| `Decyzja` | `Outbox._drain` under `_changed`: `_again` → another pass, else `_draining = False` and `clock.after(RETRY_S, _woken)` when `_stopped_on` or `_read_failed` is set and no wake is armed |
 | `Budzenie` | `Outbox._woken` (`_retry_armed = False`, `send_in_background`), also in a process that already closed its port |
 | `Zamknij`, `KoniecProcesu` | `server.py` `serve`: uvicorn closes the socket, waits up to `_GRACEFUL_SHUTDOWN_S` (5 s) for open connections, then the process ends and the daemon queue thread dies with it |
 | `Wylacz` | none: the computer switches off or the process dies; the queue folder and the Skrzynka stay |
@@ -423,7 +425,7 @@ configuration is checked in full.
 | `znane` | a comment in 2 parts to the known issue of an Uwaga; 2 network failures, 1 lost answer, 2 file errors, 1 switch-off | passes |
 | `dwie-kolejki` | two queues of one folder in one process, one Kontrola in 2 parts; 1 network failure, 1 file error, 1 switch-off | passes |
 | `dwa-procesy` | one Kontrola; the old Centrum closes its port and the new one starts before the old process ends; no other failure | known finding `dwa_procesy` |
-| `odczyt` | one Kontrola; 1 network failure, 1 read error of the queue file, 1 switch-off | known finding `odczyt` |
+| `odczyt` | one Kontrola; 1 network failure, 1 read error of the queue file, 1 switch-off | passes |
 | `odmowa-tresci` | one Uwaga in 2 parts; 1 refused content, 1 switch-off | known finding `odmowa_po_zalozeniu` |
 
 Every configuration checks `TypeOK`, `JednoIssue`, `WszystkieCzesci`,
@@ -454,12 +456,7 @@ its bound.
    sends. In the same window the docstring of `Outbox.resume` („żaden `*.tmp`
    nie ma teraz autora”) is not true: B's `resume` can remove the `.tmp` of a
    `post` that A still writes, and that `post` returns `False`.
-3. **`odczyt`, Zbieganie (`odczyt`)**: `_queued` gets an `OSError` reading a
-   queue file (something holds it open), `_skip_unreadable` skips it, the pass
-   ends with `_stopped_on = None`, so `_drain` arms no `RETRY_S` wake. The
-   file waits for the next wysyłka or the next start of Centrum, with the
-   network working.
-4. **`odmowa-tresci`, JednoIssue (`odmowa_po_zalozeniu`)**: `open_issue`
+3. **`odmowa-tresci`, JednoIssue (`odmowa_po_zalozeniu`)**: `open_issue`
    opens the issue of an Uwaga, the Skrzynka refuses a `comment` (`Rejected`),
    the file waits for the next start (`_rejected`), and the next start opens a
    second issue with the same Uwaga. The model allows one refusal; by the code,
@@ -524,28 +521,27 @@ one guard or step whose code it names, on a copy of the checkout
   sent again in the same Centrum run; and, as a model check without code, the
   accepted risk removed from JednoIssue (the risk is reachable).
 - WszystkieCzesci: a failed comment skipped instead of ending the wysyłka; a
-  Zgłoszenie that never posts its comments, with the network working; and, in
-  the configurations of known findings that excuse another promise, a refused
-  comment that removes the file instead of `_rejected` (`odmowa-tresci`, which
-  excuses only JednoIssue after `odmowa_po_zalozeniu`) and an unreadable file
-  removed instead of skipped by `_skip_unreadable` (`odczyt`, which excuses
-  only Zbieganie after `odczyt`); a `post` that returns True although
+  Zgłoszenie that never posts its comments, with the network working; a
+  refused comment that removes the file instead of `_rejected`
+  (`odmowa-tresci`, whose known finding excuses only JednoIssue after
+  `odmowa_po_zalozeniu`); an unreadable file removed instead of skipped by
+  `_skip_unreadable` (`odczyt`); and a `post` that returns True although
   `os.replace` raised OSError (`okres`) or although `resume` of the new
   Centrum removed its `.json.tmp` (`dwa-procesy`).
 - CzesciWKolejnosci: comments posted from the last part.
 - Zbieganie: a network failure that skips the file to the next start; a pass
-  that stops without `_stopped_on`; no `RETRY_S` wake; a wake that does not
+  that stops without `_stopped_on`; no `RETRY_S` wake; no `RETRY_S` wake after
+  an unreadable file (`_read_failed`, `odczyt`); a wake that does not
   ask for a pass (`_woken`); `post` without `send_in_background`; `_again`
   ignored; a pass that does not clear `_draining`; `resume` without
   `send_in_background`.
 
 Two mutations fix a known finding in the model (a found Zgłoszenie gets its
 other parts; the new Centrum waits until the old process ends) and must end
-with `MODEL KOLEJKI: ZNALEZISKO ZNIKNĘŁO`. Known findings `odczyt` and
-`odmowa_po_zalozeniu` have no such fix mutation, so nothing shows that a fix
-of either would end with `ZNALEZISKO ZNIKNĘŁO`. That their configurations
-break no other promise stands on the two mutations above in `odmowa-tresci`
-and `odczyt`, each of which breaks WszystkieCzesci after the finding's cause
-and ends with `NOWE NARUSZENIE`. A second break of the same promise after the
-same cause (another second issue after a refused comment, another file that
-waits after a read error) the finding excuses, and that is not checked.
+with `MODEL KOLEJKI: ZNALEZISKO ZNIKNĘŁO`. Known finding
+`odmowa_po_zalozeniu` has no such fix mutation, so nothing shows that its fix
+would end with `ZNALEZISKO ZNIKNĘŁO`. That its configuration breaks no other
+promise stands on the mutation above in `odmowa-tresci`, which breaks
+WszystkieCzesci after the finding's cause and ends with `NOWE NARUSZENIE`. A
+second break of the same promise after the same cause (another second issue
+after a refused comment) the finding excuses, and that is not checked.
