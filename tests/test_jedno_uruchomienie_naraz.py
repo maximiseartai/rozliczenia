@@ -100,7 +100,7 @@ def test_blokada_spoza_modelu_konczy_sprawdzenie_bledem_z_watkiem_i_krokiem_zami
     try:
         with pytest.raises(explorer.Hang) as hang:
             explorer.explore(explorer.SCOPES["zamknij-w-trakcie"], step_limit=2)
-        assert runs.threading is threading
+        assert vars(runs)["threading"] is threading
     finally:
         released.set()
 
