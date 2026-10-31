@@ -5,12 +5,12 @@ na początku treści issue, tytuł i co z issue, które Maks zamknął), do nowe
 jak Uwaga taty), do issue o znanym numerze (``KnownIssue``) albo do jednego otwartego Zgłoszenia problemu
 (``ReportIssue``: wiersz odcisku problemu w treści i tytuł). Najpierw trafia do własnego pliku JSON w
 ``config/zgloszenia/kolejka/`` (poza Gitem), potem jeden wątek w tle wysyła wszystkie pliki po kolei i usuwa
-wysłane. Porażka (brak klucza, odmowa, brak sieci) zostawia plik bez Komunikatu; wątek rusza znów sam po
-``RETRY_S``, przy starcie Centrum (``resume``) i po każdej nowej wysyłce. Plik do ``KnownIssue``, którego skrzynka
-już nie ma, kolejka porzuca z linią dziennika (#402). Wysłany plik dostaje znacznik dostarczenia, zanim zniknie,
-więc plik, którego nie da się usunąć, nie idzie drugi raz. Przerwanie między wysłaniem a znacznikiem powtarza
-wysyłkę (co najmniej raz, decyzja 12). Treść nigdy nie trafia do dziennika Centrum: tylko etykieta, okres, numer
-issue i przyczyna czekania (decyzja 13).
+wysłane. Porażka (brak klucza, odmowa, brak sieci) i plik, którego nie da się odczytać, bo trzyma go inny program,
+zostawiają plik bez Komunikatu; wątek rusza znów sam po ``RETRY_S``, przy starcie Centrum (``resume``) i po każdej
+nowej wysyłce. Plik do ``KnownIssue``, którego skrzynka już nie ma, kolejka porzuca z linią dziennika (#402).
+Wysłany plik dostaje znacznik dostarczenia, zanim zniknie, więc plik, którego nie da się usunąć, nie idzie drugi
+raz. Przerwanie między wysłaniem a znacznikiem powtarza wysyłkę (co najmniej raz, decyzja 12). Treść nigdy nie
+trafia do dziennika Centrum: tylko etykieta, okres, numer issue i przyczyna czekania (decyzja 13).
 
 Issue okresu kolejka znajduje po wierszu rozpoznawczym przy każdej próbie wysyłki i dopisuje do niego części jako
 komentarze. Bez niego zakłada nowe issue: pierwsza część (albo nagłówek) jest jego treścią, kolejne komentarzami.
@@ -308,12 +308,17 @@ def _parse(text: str) -> _Queued | None:
 
 
 def _queued(path: Path) -> _Queued | None:
-    """Plik kolejki; pliku, którego nie da się odczytać, nie ma w tym przejściu."""
+    """Plik kolejki; ``None``, gdy jego treść jest uszkodzona albo ma nieznany schemat.
+
+    ``OSError`` odczytu (np. plik otwarty przez OneDrive albo antywirus) idzie do wołającego: za chwilę plik może dać
+    się odczytać.
+    """
 
     try:
-        return _parse(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError):
+        text = path.read_text(encoding="utf-8")
+    except UnicodeError:
         return None
+    return _parse(text)
 
 
 def _string(value: object) -> str:
@@ -508,11 +513,11 @@ class Outbox:
     Dwie kolejki jednego folderu w tym procesie nie wysyłają naraz (``_claimed``): kolejka, która zastanie przejście
     drugiej, nie wysyła nic, a druga po swoim przejściu robi następne.
 
-    Przejście, które stanęło na przyczynie dla całej kolejki, nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba
-    że już jest nastawione; budzenie rusza wysyłkę w tle. Odrzucona treść i wysyłka czekająca w ``prepare`` budzenia
-    nie nastawiają: ponowienie im nie pomoże. Linia „skrzynka-czeka” trafia do dziennika tylko przy zmianie przyczyny
-    (zeruje ją każde dostarczenie i przejście do końca), bo budzenie co minutę zapełniłoby ostatnie wpisy, które niesie
-    Diagnoza.
+    Przejście, które stanęło na przyczynie dla całej kolejki albo pominęło plik, którego odczyt rzucił ``OSError``,
+    nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba że już jest nastawione; budzenie rusza wysyłkę w tle.
+    Odrzucona treść, plik z uszkodzoną treścią i wysyłka czekająca w ``prepare`` budzenia nie nastawiają: ponowienie
+    im nie pomoże. Linia „skrzynka-czeka” trafia do dziennika tylko przy zmianie przyczyny (zeruje ją każde
+    dostarczenie i przejście do końca), bo budzenie co minutę zapełniłoby ostatnie wpisy, które niesie Diagnoza.
     """
 
     def __init__(
@@ -625,10 +630,11 @@ class Outbox:
 
     def _drain(self) -> None:
         while True:
+            unread = False
             try:
                 if _claimed(self._directory):
                     try:
-                        self._send_all()
+                        unread = self._send_all()
                     finally:
                         if _released(self._directory):
                             with self._lock:
@@ -638,7 +644,7 @@ class Outbox:
             with self._changed:
                 if not self._again:
                     self._draining = False
-                    if self._stopped_on is not None and not self._retry_armed:
+                    if (self._stopped_on is not None or unread) and not self._retry_armed:
                         self._retry_armed = True
                         self._clock.after(RETRY_S, self._woken)
                     self._changed.notify_all()
@@ -650,19 +656,25 @@ class Outbox:
             self._retry_armed = False
         self.send_in_background()
 
-    def _send_all(self) -> None:
+    def _send_all(self) -> bool:
         """Pliki kolejki po nazwie (czas utworzenia); porażka skrzynki zatrzymuje przejście albo pomija plik (``_waiting``).
 
-        ``_stopped_on`` to potem przyczyna, na której przejście stanęło, albo ``None``.
+        ``_stopped_on`` to potem przyczyna, na której przejście stanęło, albo ``None``. ``True``: przejście pominęło
+        plik, którego odczyt rzucił ``OSError``.
         """
 
+        unread = False
         for path in sorted(self._directory.glob("*.json")):
             if path.name in self._undeleted:
                 self._remove(path)
                 continue
             if path.name in self._rejected:
                 continue
-            queued = _queued(path)
+            try:
+                queued = _queued(path)
+            except OSError:
+                unread = True
+                queued = None
             if queued is None:
                 self._skip_unreadable(path)
                 continue
@@ -684,7 +696,7 @@ class Outbox:
                     if cause != self._stopped_on:
                         self._log.box_post_waiting(label=label, period=period, cause=cause)
                     self._stopped_on = cause
-                    return
+                    return unread
                 self._rejected.add(path.name)
                 with self._lock:
                     self._rejected_posts.add((post.run_id, label))
@@ -702,6 +714,7 @@ class Outbox:
                 replace_atomically(path, _queue_text(post, delivered_parts=len(post.parts)))
             self._remove(path)
         self._stopped_on = None
+        return unread
 
     def _remember_address(self, post: Post, outcome: Delivered) -> None:
         """Dopisuje adres pierwszego komentarza do pliku ``addresses``; nieudany zapis to tylko wpis w dzienniku."""

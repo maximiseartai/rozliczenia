@@ -135,7 +135,7 @@ MUTATIONS = (
         (Edit(MODEL, '/\\ Idz(q, "plik", "_queued: read_text rzuca OSError, _skip_unreadable pomija plik")\n',
               '/\\ Idz(q, "usun", "_queued: read_text rzuca OSError, _remove")\n'),),
         _check("odczyt"),
-        "Kontrola ilości, której pliku raz nie dało się odczytać, znika bez wysyłki, choć jej znalezisko wybacza tylko Zbieganie",
+        "Kontrola ilości, której pliku raz nie dało się odczytać, znika bez wysyłki",
         NEW,
     ),
     Mutation(
@@ -157,10 +157,10 @@ MUTATIONS = (
             ),
             Edit(
                 MODEL,
-                "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, undeleted, rejected, lista, biez, "
-                "bezZnacznika, bezOchrony,\n                   passes, zamkniecia, nadawanie, zgubione, odmowy, "
+                "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, nieodczytany, undeleted, rejected, lista, "
+                "biez, bezZnacznika, bezOchrony,\n                   passes, zamkniecia, nadawanie, zgubione, odmowy, "
                 "bledyPliku, wylaczenia>>\n",
-                "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, undeleted, lista, biez, "
+                "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, nieodczytany, undeleted, lista, biez, "
                 "bezZnacznika, bezOchrony,\n                   passes, zamkniecia, nadawanie, zgubione, odmowy, "
                 "bledyPliku, wylaczenia>>\n"
                 '    /\\ pc\'[q] = "plik" \\/ UNCHANGED rejected\n',
@@ -180,10 +180,17 @@ MUTATIONS = (
     ),
     Mutation(
         "brak budzenia RETRY_S (_drain: clock.after)",
-        (Edit(MODEL, "            /\\ armed' = Ustaw(armed, q, armed[q] \\/ stopped[q])\n",
+        (Edit(MODEL, "            /\\ armed' = Ustaw(armed, q, armed[q] \\/ stopped[q] \\/ nieodczytany[q])\n",
               "            /\\ UNCHANGED armed\n"),),
         _check("okres"),
         "po braku sieci wysyłka czeka do następnego startu albo następnej wysyłki",
+        NEW,
+    ),
+    Mutation(
+        "brak budzenia RETRY_S po nieczytelnym pliku (_drain: or unread)",
+        (Edit(MODEL, "armed[q] \\/ stopped[q] \\/ nieodczytany[q])\n", "armed[q] \\/ stopped[q])\n"),),
+        _check("odczyt"),
+        "Kontrola ilości, której pliku raz nie dało się odczytać, czeka do następnej wysyłki albo startu, choć sieć działa",
         NEW,
     ),
     Mutation(

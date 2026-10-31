@@ -519,7 +519,7 @@ def test_zapis_urwany_przez_utrate_zasilania_znika_przy_starcie_i_nie_jest_wysyl
     ],
     ids=["urwany", "nie-obiekt", "bez-celu", "nowszy-schemat", "nieznana-etykieta"],
 )
-def test_plik_kolejki_ktorego_nie_da_sie_odczytac_zostaje_z_jednym_wpisem_i_nie_wstrzymuje_innych(
+def test_plik_kolejki_z_uszkodzona_trescia_zostaje_z_jednym_wpisem_bez_ponowienia_i_nie_wstrzymuje_innych(
     tmp_path: Path, text: str
 ) -> None:
     queue = Queue(tmp_path, FakeReportBox())
@@ -536,6 +536,35 @@ def test_plik_kolejki_ktorego_nie_da_sie_odczytac_zostaje_z_jednym_wpisem_i_nie_
 
     assert queue.log().count(f"skrzynka-nieczytelny plik={broken}") == 1
     assert "nieoczekiwany-wyjatek" not in queue.log()
+    queue.passed()
+    assert queue.clock.wakes == 0
+
+
+def test_plik_kolejki_ktorego_odczyt_raz_sie_nie_udal_wychodzi_po_minucie_bez_kolejnej_wysylki(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = Queue(tmp_path, FakeReportBox())
+    [held] = queue.queued("treść\n")
+    read_text = Path.read_text
+    reads: list[Path] = []
+
+    def held_once(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if path.name == held and not reads:
+            reads.append(path)
+            raise PermissionError("plik otwarty w innym programie")
+        return read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", held_once)
+    queue.outbox.resume()
+    queue.passed()
+    assert (queue.box.issues, queue.files()) == ([], [held])
+
+    queue.clock.advance(RETRY_S)
+
+    assert queue.box.wait_until(lambda box: len(box.issues) == 1)
+    assert wait_for(lambda: queue.files() == [])
+    queue.passed()
+    assert queue.clock.wakes == 0
 
 
 def test_wyslanej_wysylki_ktorej_nie_da_sie_usunac_skrzynka_nie_dostaje_drugi_raz(
