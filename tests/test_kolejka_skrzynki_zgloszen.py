@@ -7,15 +7,20 @@ Centrum nieosiągalna rozsądnym kosztem.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import threading
 
 import pytest
 
 from rozliczenia.centrum.keyed_box import KeyedBox
 from rozliczenia.centrum.log import CentrumLog
-from rozliczenia.centrum.outbox import RETRY_S, Frame, NewIssue, Outbox, PeriodThread, Post, ReportIssue
+from rozliczenia.centrum.outbox import LOCK_FILE, RETRY_S, Frame, NewIssue, Outbox, PeriodThread, Post, ReportIssue
 from rozliczenia.centrum.report_box import COMMENT_LIMIT, Refused, Rejected, Unreachable
 
 from tests.fixtures.centrum import FakeIssue, FakeReportBox
@@ -55,6 +60,7 @@ class Queue:
 
     def __init__(self, tmp_path: Path, box: FakeReportBox, key: str | None = KEY) -> None:
         self.directory = tmp_path / "config" / "zgloszenia" / "kolejka"
+        self.lock = tmp_path / "config" / LOCK_FILE
         self.log_path = tmp_path / "logs" / "centrum-rozliczen.log"
         self.box = box
         self.key = key
@@ -71,6 +77,7 @@ class Queue:
             keyed,
             CentrumLog(self.log_path),
             clock=self.clock,
+            lock=self.lock,
             on_delivered=lambda post, number: self.delivered.append((post.run_id, number)),
         )
 
@@ -378,7 +385,10 @@ def test_tresc_ktorej_skrzynka_odmawia_zostaje_w_kolejce_a_nastepna_wychodzi_w_t
     assert wait_for(lambda: queue.files() == [])
 
 
-def test_druga_kolejka_na_tym_folderze_nie_wysyla_pliku_w_trakcie_wysylki_pierwszej(tmp_path: Path) -> None:
+WAITING_FOR_PASS = "skrzynka-czeka-na-przejscie"
+
+
+def test_druga_kolejka_na_tym_folderze_czeka_z_wysylka_na_koniec_przejscia_pierwszej(tmp_path: Path) -> None:
     # Restart Centrum w tym samym procesie: kolejka poprzedniego startu dalej zakłada issue okresu.
     hold = threading.Event()
     queue = Queue(tmp_path, FakeReportBox(open_hold=hold))
@@ -388,16 +398,17 @@ def test_druga_kolejka_na_tym_folderze_nie_wysyla_pliku_w_trakcie_wysylki_pierws
     restarted = queue.restarted()
 
     restarted.resume()
-    assert not restarted.wait_delivered("", THREAD.label, timeout_s=30)
+    assert wait_for(lambda: WAITING_FOR_PASS in queue.log())
     searched = len(queue.box.listed)
     hold.set()
     queue.passed()
+    assert not restarted.wait_delivered("", THREAD.label, timeout_s=30)
 
-    assert (searched, len(queue.box.issues)) == (1, 1)
+    assert (searched, len(queue.box.listed), len(queue.box.issues)) == (1, 1, 1)
     assert queue.files() == []
 
 
-def test_przejscie_pominiete_przez_druga_kolejke_robi_pierwsza_po_swoim(tmp_path: Path) -> None:
+def test_druga_kolejka_wysyla_po_przejsciu_pierwszej_ktore_stanelo_bez_sieci(tmp_path: Path) -> None:
     hold = threading.Event()
     queue = Queue(tmp_path, FakeReportBox(open_hold=hold, outcomes=[Unreachable()]))
     queue.queued("treść\n")
@@ -405,11 +416,116 @@ def test_przejscie_pominiete_przez_druga_kolejke_robi_pierwsza_po_swoim(tmp_path
     assert queue.box.opening.wait(30)
     restarted = queue.restarted()
     restarted.resume()
-    assert not restarted.wait_delivered("", THREAD.label, timeout_s=30)
+    assert wait_for(lambda: WAITING_FOR_PASS in queue.log())
 
     hold.set()
 
     assert queue.box.wait_until(lambda box: len(box.issues) == 1)
+    assert wait_for(lambda: queue.files() == [])
+
+
+
+def test_plik_tymczasowy_z_chwili_startu_znika_dopiero_po_przejsciu_innej_kolejki_tego_folderu(tmp_path: Path) -> None:
+    hold = threading.Event()
+    queue = Queue(tmp_path, FakeReportBox(open_hold=hold))
+    queue.queued("treść\n")
+    queue.outbox.resume()
+    assert queue.box.opening.wait(30)
+    # Zapis, który przejście tej kolejki właśnie robi (np. numer issue Uwagi taty przez replace_atomically).
+    written = queue.directory / "20261023T101400000000Z-0001-uwaga-taty-3f2a9c1b.json.tmp"
+    written.write_text("{", encoding="utf-8")
+    restarted = queue.restarted()
+
+    restarted.resume()
+    assert wait_for(lambda: WAITING_FOR_PASS in queue.log())
+    left = queue.files()
+    hold.set()
+    queue.passed()
+    assert not restarted.wait_delivered("", THREAD.label, timeout_s=30)
+
+    assert written.name in left
+    assert queue.files() == []
+
+
+# Kolejka starego procesu Centrum, który zwolnił już port (``_GRACEFUL_SHUTDOWN_S`` w ``server.py``): jej przejście
+# pyta skrzynkę o issue okresu i dostaje odpowiedź dopiero po linii na wejściu; potem wypisuje, ile issue założyło.
+# Moduł ``Outbox`` z importu tego pliku: mutacje zmiany (``tools/mutacje_zmiany.py``) wybierają testy po grafie importów.
+OLD_CENTRUM = f"""
+import sys
+import threading
+from pathlib import Path
+
+from rozliczenia.centrum.keyed_box import KeyedBox
+from rozliczenia.centrum.log import CentrumLog
+from {Outbox.__module__} import Outbox
+from tests.fixtures.centrum import FakeReportBox
+from tests.fixtures.clock import ManualClock
+
+config = Path(sys.argv[1])
+hold = threading.Event()
+box = FakeReportBox(search_hold=hold)
+clock = ManualClock()
+keyed = KeyedBox(box, lambda: "{KEY}", clock=clock)
+log = CentrumLog(config.parent / "stare-centrum.log")
+outbox = Outbox(config / "zgloszenia" / "kolejka", keyed, log, clock=clock, lock=config / "{LOCK_FILE}")
+outbox.resume()
+assert box.searching.wait(30)
+print("szuka", flush=True)
+sys.stdin.readline()
+hold.set()
+outbox.wait_delivered("", "{THREAD.label}", timeout_s=30)
+print(len(box.issues), flush=True)
+"""
+
+
+@contextmanager
+def old_centrum(tmp_path: Path) -> Iterator[subprocess.Popen[str]]:
+    """Stary proces Centrum, którego przejście kolejki na folderze ``tmp_path`` właśnie pyta skrzynkę."""
+
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), str(ROOT)])}
+    process = subprocess.Popen(
+        [sys.executable, "-c", OLD_CENTRUM, str(tmp_path / "config")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline() == "szuka\n", "przejście starego Centrum nie zapytało skrzynki"
+        yield process
+    finally:
+        process.kill()
+        process.communicate()
+
+
+def test_kolejka_nowego_centrum_czeka_z_wysylka_na_koniec_przejscia_starego_procesu(tmp_path: Path) -> None:
+    queue = Queue(tmp_path, FakeReportBox())
+    queue.queued("treść\n")
+
+    with old_centrum(tmp_path) as old:
+        queue.outbox.resume()
+        assert wait_for(lambda: WAITING_FOR_PASS in queue.log())
+        assert old.stdin is not None and old.stdout is not None
+        old.stdin.write("\n")
+        old.stdin.flush()
+        opened_by_old = old.stdout.readline()
+        queue.passed()
+
+    assert (opened_by_old, queue.box.listed, queue.box.issues) == ("1\n", [], [])
+    assert queue.files() == []
+
+
+def test_przejscie_starego_procesu_ktory_zginal_nie_wstrzymuje_kolejki_nowego_centrum(tmp_path: Path) -> None:
+    queue = Queue(tmp_path, FakeReportBox())
+    queue.queued("treść\n")
+
+    with old_centrum(tmp_path) as old:
+        queue.outbox.resume()
+        assert wait_for(lambda: WAITING_FOR_PASS in queue.log())
+        old.kill()
+
+        assert queue.box.wait_until(lambda box: len(box.issues) == 1)
     assert wait_for(lambda: queue.files() == [])
 
 
@@ -519,6 +635,7 @@ def test_zapis_urwany_przez_utrate_zasilania_znika_przy_starcie_i_nie_jest_wysyl
     )
 
     queue.outbox.resume()
+    queue.passed()
 
     assert queue.files() == []
     assert queue.box.keys == []
@@ -574,7 +691,7 @@ def test_wyslanej_wysylki_ktorej_nie_da_sie_usunac_skrzynka_nie_dostaje_drugi_ra
     assert wait_for(lambda: failed_removals() == 1)
     queue.outbox.post(post(["druga\n"]))
     assert wait_for(lambda: failed_removals() == 2)
-    queue.passed()  # inaczej nowa kolejka zastaje przejście tej i oddaje mu swoje (outbox._claimed)
+    queue.passed()
     queue.restarted().resume()
     assert wait_for(lambda: failed_removals() == 4)
     monkeypatch.setattr(Path, "unlink", unlink)

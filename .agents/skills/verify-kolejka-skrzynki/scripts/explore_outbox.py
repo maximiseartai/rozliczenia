@@ -48,6 +48,7 @@ from rozliczenia.centrum import outbox as outbox_module
 from rozliczenia.centrum.keyed_box import KeyedBox
 from rozliczenia.centrum.log import CentrumLog
 from rozliczenia.centrum.outbox import (
+    LOCK_FILE,
     KnownIssue,
     NewIssue,
     Outbox,
@@ -631,6 +632,7 @@ def execute(
             KeyedBox(box, lambda: KEY, clock=clock),
             _Log(work / "centrum.log", failures),
             clock=clock,
+            lock=work / "config" / LOCK_FILE,
         )
 
     with _queue_threads(started_threads):

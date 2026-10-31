@@ -27,15 +27,17 @@ uzupełnia w nim odnośnik do Logów, które skrzynka przyjęła po jej zapisani
 
 from __future__ import annotations
 
+import errno
 import itertools
 import json
+import sys
 import threading
-from collections.abc import Callable, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final, Literal, assert_never, get_args
+from typing import Any, BinaryIO, Final, Literal, assert_never, get_args
 
 from rozliczenia.centrum.atomic_file import replace_atomically
 from rozliczenia.centrum.clock import Clock
@@ -54,6 +56,8 @@ from rozliczenia.centrum.report_box import (
 QUEUE_DIRECTORY: Final = "kolejka"
 # Poza ``config/zgloszenia``: weryfikacja Kontroli ilości sprawdza, że jest tam tylko kolejka.
 ADDRESSES_FILE: Final = "skrzynka-adresy.jsonl"
+# Blokada przejść kolejki (``_folder_lock``), z tego samego powodu obok ``ADDRESSES_FILE``.
+LOCK_FILE: Final = "skrzynka-kolejka.lock"
 SCHEMA_VERSION: Final = 2
 # Pliki kolejki sprzed ``NewIssue`` (#273) mają cel w kluczu ``thread`` i zawsze jest nim issue okresu.
 _PERIOD_THREAD_SCHEMA: Final = 1
@@ -72,27 +76,68 @@ DELIVERY_WAIT_S: Final = 5.0
 Frame = Callable[[int, int, str], str]
 """Komentarz części ``k`` z ``n`` z jej tekstu."""
 
-# Foldery kolejki z trwającym przejściem w tym procesie i czy inna kolejka tego folderu prosi o następne. Dwie
-# kolejki jednego folderu (restart Centrum w procesie) nie wysyłają naraz: obie nie znalazłyby issue okresu, którego
-# druga jeszcze nie założyła, i założyłyby je dwa razy. Między procesami pilnuje tego port Centrum (``launcher``).
-_PASSES_LOCK: Final = threading.Lock()
-_PASSES: Final[dict[Path, bool]] = {}
+
+@contextmanager
+def _folder_lock(lock: Path, *, waiting: Callable[[], None]) -> Iterator[None]:
+    """Wyłączna blokada pliku ``lock``: jedno przejście kolejki na folder kolejki naraz, także między procesami.
+
+    Dwie kolejki jednego folderu, które wysyłają naraz, nie znalazłyby issue okresu, którego druga jeszcze nie
+    założyła, i założyłyby je dwa razy. Tak jest przy restarcie Centrum: uvicorn zwalnia port, zanim stary proces się
+    skończy (``_GRACEFUL_SHUTDOWN_S`` w ``server.py``), a jego wątek kolejki dalej wysyła. Gdy blokadę trzyma inna
+    kolejka, woła ``waiting`` i czeka na koniec jej przejścia. Blokadę zdejmuje też system, gdy proces, który ją
+    trzyma, zginie.
+    """
+
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("ab") as handle:
+        if not _locked(handle, wait=False):
+            waiting()
+            _locked(handle, wait=True)
+        try:
+            yield
+        finally:
+            _unlock(handle)
 
 
-def _claimed(directory: Path) -> bool:
-    """Czy to przejście może wysyłać z ``directory``; inaczej prosi trwające przejście o następne."""
+def _locked(handle: BinaryIO, *, wait: bool) -> bool:
+    """Bierze blokadę pierwszego bajtu ``handle``; bez ``wait`` ``False``, gdy trzyma ją inny uchwyt."""
 
-    with _PASSES_LOCK:
-        alone = directory not in _PASSES
-        _PASSES[directory] = not alone
-        return alone
+    handle.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
+            except OSError as failure:
+                if not wait:
+                    return False
+                if failure.errno != errno.EDEADLOCK:  # LK_LOCK poddaje się po 10 próbach co sekundę
+                    raise
+            else:
+                return True
+    else:
+        import fcntl
+
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
 
 
-def _released(directory: Path) -> bool:
-    """Kończy przejście z ``directory``; ``True``, gdy w jego trakcie inna kolejka tego folderu prosiła o następne."""
+def _unlock(handle: BinaryIO) -> None:
+    handle.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
 
-    with _PASSES_LOCK:
-        return _PASSES.pop(directory)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 Closed = Literal["new_issue", "reuse"]
 _LABELS: Final = frozenset(get_args(Label))
 _CLOSED: Final = frozenset(get_args(Closed))
@@ -535,8 +580,9 @@ class Outbox:
     przejście pójdzie dalej. ``prepare`` dostaje wysyłkę z pliku tuż przed wysłaniem i zwraca tę, która pójdzie, albo
     ``None``: wysyłka czeka na inną i zostaje w kolejce do następnego przejścia.
 
-    Dwie kolejki jednego folderu w tym procesie nie wysyłają naraz (``_claimed``): kolejka, która zastanie przejście
-    drugiej, nie wysyła nic, a druga po swoim przejściu robi następne.
+    Dwie kolejki jednego folderu, w tym procesie albo w starym i nowym procesie Centrum, nie wysyłają naraz: przejście
+    bierze blokadę pliku ``lock`` (``_folder_lock``), a przejście, które zastanie ją zajętą, zapisuje to w dzienniku
+    i czeka na koniec tamtego.
 
     Przejście, które stanęło na przyczynie dla całej kolejki, nastawia jedno budzenie ``clock`` za ``RETRY_S``, chyba
     że już jest nastawione; budzenie rusza wysyłkę w tle. Odrzucona treść i wysyłka czekająca w ``prepare`` budzenia
@@ -552,6 +598,7 @@ class Outbox:
         log: CentrumLog,
         *,
         clock: Clock,
+        lock: Path,
         on_delivered: Callable[[Post, int], None] = lambda _post, _number: None,
         on_rejected: Callable[[Post], None] = lambda _post: None,
         prepare: Callable[[Post], Post | None] = lambda post: post,
@@ -561,6 +608,7 @@ class Outbox:
         self._box = box
         self._log = log
         self._clock = clock
+        self._lock_file = lock
         self._on_delivered = on_delivered
         self._on_rejected = on_rejected
         self._prepare = prepare
@@ -575,22 +623,26 @@ class Outbox:
         self._first_comments: dict[tuple[str, Label], str | None] = {} if addresses is None else _read_addresses(addresses)
         self._undeleted: set[str] = set()  # wysłane w tej pracy Centrum, usunięcie się nie udało i jest w dzienniku
         self._unreadable: set[str] = set()  # nieczytelne, już w dzienniku tej pracy Centrum
+        self._leftovers: list[str] = []  # *.tmp z chwili resume (przed wątkiem kolejki), usuwa je przejście
         self._rejected: set[str] = set()  # treść odrzucona przez skrzynkę, w dzienniku; następna próba po starcie
         self._rejected_posts: set[tuple[str, Label]] = set()  # run_id i etykieta plików z _rejected
 
     def resume(self) -> None:
-        """Przy starcie Centrum: usuwa pozostałości urwanego zapisu i wysyła w tle wszystko, co czeka.
+        """Przy starcie Centrum: wysyła w tle wszystko, co czeka, a najpierw usuwa pozostałości urwanego zapisu.
 
         Woła go ``lifespan`` przed przyjęciem pierwszego zapytania HTTP. Wysyłkę tworzy tylko zapytanie HTTP
-        (Uruchomienie albo „Wyślij” Uwagi taty), a wątek wysyłki rusza dopiero tutaj, więc żaden ``*.tmp`` nie ma
-        teraz autora: każdy został po zapisie przerwanym w poprzedniej pracy Centrum (np. utrata zasilania). Plik
-        ``.json`` obok niego, jeśli jest, ma pełną treść sprzed tego zapisu. Start nie czeka na skrzynkę: pyta ją tylko wątek w tle.
+        (Uruchomienie albo „Wyślij” Uwagi taty), więc pliki ``*.tmp``, które są teraz w folderze, nie są zapisami tego
+        procesu. Usuwa je pierwsze przejście, pod blokadą przejść (``_folder_lock``), więc przejście innej kolejki tego
+        folderu (starego procesu Centrum) skończyło już wtedy swoje zapisy. Każdy inny ``*.tmp`` z tej chwili został po
+        zapisie przerwanym w poprzedniej pracy Centrum (np. utrata zasilania), a plik ``.json`` obok niego, jeśli jest,
+        ma pełną treść sprzed tego zapisu. Jedno okno zostaje: ``post`` zapytania HTTP, które stary proces Centrum
+        obsługuje jeszcze po zwolnieniu portu (``_GRACEFUL_SHUTDOWN_S`` w ``server.py``), może właśnie pisać swój
+        ``*.tmp``; usunięty, ten ``post`` zwraca ``False``. Start nie czeka na skrzynkę ani na blokadę: czeka na nie
+        tylko wątek w tle.
         """
 
         with suppress(OSError):
-            for leftover in self._directory.glob("*.tmp"):
-                with suppress(OSError):
-                    leftover.unlink()
+            self._leftovers = [path.name for path in self._directory.glob("*.tmp")]
         self.send_in_background()
 
     @property
@@ -656,13 +708,9 @@ class Outbox:
     def _drain(self) -> None:
         while True:
             try:
-                if _claimed(self._directory):
-                    try:
-                        self._send_all()
-                    finally:
-                        if _released(self._directory):
-                            with self._lock:
-                                self._again = True
+                with _folder_lock(self._lock_file, waiting=self._log.box_pass_waiting):
+                    self._remove_leftovers()
+                    self._send_all()
             except Exception as failure:
                 self._log.unexpected_failure(failure, where="wysyłka do Skrzynki Zgłoszeń")
             with self._changed:
@@ -738,6 +786,14 @@ class Outbox:
                 replace_atomically(path, _queue_text(post, delivered_parts=len(post.parts)))
             self._remove(path)
         self._stopped_on = None
+
+    def _remove_leftovers(self) -> None:
+        """Usuwa pliki ``*.tmp`` z chwili ``resume``, raz, pod blokadą przejść; nieudane usunięcie nic nie zatrzymuje."""
+
+        for name in self._leftovers:
+            with suppress(OSError):
+                (self._directory / name).unlink(missing_ok=True)
+        self._leftovers = []
 
     def _remember_address(self, post: Post, outcome: Delivered) -> None:
         """Dopisuje adres pierwszego komentarza do pliku ``addresses``; nieudany zapis to tylko wpis w dzienniku."""

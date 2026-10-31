@@ -167,8 +167,9 @@ MUTATIONS = (
         (
             Edit(
                 VERIFIED,
-                "                    leftover.unlink()\n        self.send_in_background()\n",
-                "                    leftover.unlink()\n",
+                '            self._leftovers = [path.name for path in self._directory.glob("*.tmp")]\n'
+                "        self.send_in_background()\n",
+                '            self._leftovers = [path.name for path in self._directory.glob("*.tmp")]\n',
             ),
         ),
         (EXPLORER, "--scope", "nowe-issue"),

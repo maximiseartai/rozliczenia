@@ -21,7 +21,7 @@ from rozliczenia.centrum.app import STATIC_DIRECTORY
 from rozliczenia.centrum.dad_cases import DAD_CASES_FILE, OLD_NOTES_FILE, OLD_REPORTS_FILE
 from rozliczenia.centrum.launcher import LOG_PATH
 from rozliczenia.centrum.notifications import NOTIFICATIONS_FILE
-from rozliczenia.centrum.outbox import ADDRESSES_FILE, QUEUE_DIRECTORY
+from rozliczenia.centrum.outbox import ADDRESSES_FILE, LOCK_FILE, QUEUE_DIRECTORY
 from rozliczenia.centrum.keyed_box import REPORT_KEY_FILE
 from rozliczenia.centrum.reports import UNSENT_DIRECTORY
 from rozliczenia.centrum.run_origins import CENTRUM_RUNS_FILE
@@ -203,6 +203,7 @@ def test_nieistniejacy_zapamietany_folder_okresow_jest_wyraznie_oznaczony(tmp_pa
         default_settings_path().parent / OLD_NOTES_FILE,
         default_settings_path().parent / NOTIFICATIONS_FILE,
         default_settings_path().parent / ADDRESSES_FILE,
+        default_settings_path().parent / LOCK_FILE,
         default_settings_path().parent / "plik-z-przyszlej-wersji.json",
     ],
     ids=[
@@ -216,6 +217,7 @@ def test_nieistniejacy_zapamietany_folder_okresow_jest_wyraznie_oznaczony(tmp_pa
         "uwagi-taty",
         "przeczytane-powiadomienia",
         "adresy-w-skrzynce",
+        "blokada-kolejki-skrzynki",
         "kazdy-nowy-plik-w-config",
     ],
 )

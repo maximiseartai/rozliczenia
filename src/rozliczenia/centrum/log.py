@@ -179,6 +179,11 @@ class CentrumLog:
 
         self._write("skrzynka-nieczytelny", plik=file)
 
+    def box_pass_waiting(self) -> None:
+        """Przejście kolejki Skrzynki Zgłoszeń czeka na koniec przejścia innej kolejki tego folderu (np. starego Centrum)."""
+
+        self._write("skrzynka-czeka-na-przejscie")
+
     def view_timed(
         self,
         *,

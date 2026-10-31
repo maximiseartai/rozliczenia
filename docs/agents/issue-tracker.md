@@ -117,7 +117,9 @@ create none.
   404), the file waits, because the issue may still be there. The Centrum log
   records only `skrzynka-w-kolejce`, `skrzynka-wyslano` (issue number),
   `skrzynka-czeka` (cause, once per pass; for a refused content also the file
-  name), `skrzynka-porzucono` (file name and issue number of a dropped comment)
+  name), `skrzynka-porzucono` (file name and issue number of a dropped comment),
+  `skrzynka-czeka-na-przejscie` (a pass waits until the pass of another queue
+  of the folder ends, e.g. of the old Centrum process right after a restart)
   and `skrzynka-nieczytelny` (the name of a queue file
   that is damaged or from a newer tool version; it stays and is never sent). A
   sent file is marked as delivered before it is removed, so a file Windows
