@@ -705,6 +705,35 @@ def test_zgloszenie_z_polecenia_workflow_zaklada_issue_i_konczy_sie_ok(
     assert wyjscie[-1] == "MUTACJE NOCNE OK | części 1 | przeżyło 1" + (" | zadania skilli 2 | padło skryptów 1" if ze_skryptami else "")
 
 
+@pytest.mark.parametrize(
+    ("przezyte", "skrypty", "nieprzypisane"),
+    [([_przezyta("src/a.py:1 stała")], {SKRYPT_A: "ok", SKRYPT_B: "ok"}, "src/a.py:1 stała"), ([], {SKRYPT_A: "fail", SKRYPT_B: "fail"}, f"{SKRYPT_A}, {SKRYPT_B}")],
+    ids=["przezyta-mutacja", "skrypty-ktore-padly"],
+)
+def test_pusta_noc_z_wynikiem_do_zgloszenia_konczy_sie_fail_bo_nie_ma_pr_ktoremu_go_przypisac(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], przezyte: list[dict[str, object]], skrypty: dict[str, str], nieprzypisane: str
+) -> None:
+    repo, _ = _historia_skilli(tmp_path)
+    for modul in (mutacje_nocne, mutacje_skilli):
+        monkeypatch.setattr(modul, "ROOT", repo)
+    monkeypatch.setattr(mutacje_skilli, "SKILLS", repo / ".agents" / "skills")
+    github = GitHubWPamieci()
+    monkeypatch.setattr(mutacje_nocne, "GhApi", lambda: github)
+    # Baza nocy to HEAD, więc noc nie wniosła na main żadnego commitu.
+    head = git(repo, "rev-parse", "HEAD")
+    zapisy = _zapisy(tmp_path / "zapisy", {1: (PRZEZYLO if przezyte else OK, przezyte)})
+    _wykonania(zapisy, {"mutacje-1": (PLAN_SKILLI.digest, {SKRYPT_A: skrypty[SKRYPT_A]}), "mutacje-2": (PLAN_SKILLI.digest, skrypty)})
+    plan = tmp_path / "plan-skilli" / "plan.json"
+    plan.parent.mkdir()
+    plan.write_text(PLAN_SKILLI.do_json(), encoding="utf-8")
+
+    kod = mutacje_nocne.main(["zglos", "--baza", head, "--zapisy", str(zapisy), "--czesci", "1", "--run", RUN, "--plan-skilli", str(plan)])
+
+    wyjscie = capsys.readouterr().out.splitlines()
+    assert (kod, wyjscie) == (1, [f"MUTACJE NOCNE FAIL | noc od bazy {head} nie wniosła na main commitu, któremu przypisać: {nieprzypisane}"])
+    assert github.issues == []
+
+
 @pytest.mark.parametrize("brak", ["polecenie", "--baza", "--zapisy", "--czesci", "--run"])
 def test_zgloszenie_bez_argumentu_z_planu_nocy_konczy_sie_bledem_uzycia(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], brak: str

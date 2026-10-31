@@ -28,6 +28,9 @@ Workflow ``mutacje-nocne.yml`` biegnie raz na dobę na ``main`` i ręcznie (``wo
   skrypt, który padł, linią ``SKRYPT <skrypt>`` do issue ``Przeżyte mutacje skilli z #N`` PR-u, który ostatni zmienił
   folder skilla od bazy (bez takiej zmiany: inną ścieżkę z ``mutacje_skilli.watched``, a dla podstawy z ``pilnuje``,
   a bez niej ostatni PR nocy); linii, którą issue już ma, nie dostaje drugi raz. Zadanie bez zapisu tego planu albo bez wyniku jednostki czerwieni run.
+- Noc bez commitów na ``main`` od bazy nie ma PR-u, któremu przypisać przeżytą mutację albo skrypt, który padł, więc
+  kończy się ``MUTACJE NOCNE FAIL`` z ich listą, a następna noc liczy od tej samej bazy. Workflow pomija zgłoszenie
+  pustej nocy, bo plan nie daje jej części ani skryptów, więc taki wynik daje tylko zgłoszenie z zapisami innej nocy.
 
 Bazę i liczbę części nocy drukuje lokalnie bez testów:
 
@@ -191,6 +194,15 @@ def _pr_z_tematu(temat: str) -> int | None:
     return int(znalezione["numer"]) if znalezione else None
 
 
+def _linia_main(root: Path, od: str, do_przypisania: Sequence[str]) -> list[str]:
+    """Commity linii pierwszych rodziców HEAD od ``od``, od najstarszego; bez nich ``do_przypisania`` nie ma PR-u."""
+
+    linia = _git(root, "rev-list", "--first-parent", "--reverse", f"{od}..HEAD").split()
+    if do_przypisania and not linia:
+        raise ValueError(f"noc od bazy {od} nie wniosła na main commitu, któremu przypisać: {', '.join(do_przypisania)}")
+    return linia
+
+
 def _wniesienie(root: Path, linia_main: Sequence[str], commit: str) -> int:
     """Pozycja na ``linia_main`` commitu, który wniósł ``commit`` na linię pierwszych rodziców HEAD."""
 
@@ -208,7 +220,7 @@ def _commity_linii(root: Path, plik: str, linie: Sequence[int]) -> set[str]:
 def przypisz(github: GitHub, root: Path, od: str, przezyte: Sequence[Przezyta]) -> dict[Autor, list[Przezyta]]:
     """Przeżyte mutacje według PR-u, który ostatni zmienił ich zmienione linie."""
 
-    linia_main = _git(root, "rev-list", "--first-parent", "--reverse", f"{od}..HEAD").split()
+    linia_main = _linia_main(root, od, [mutacja.id for mutacja in przezyte])
     wniesione: dict[str, int] = {}
     autorzy: dict[str, Autor] = {}
     wynik: dict[Autor, list[Przezyta]] = {}
@@ -258,7 +270,7 @@ def przypisz_skrypty(github: GitHub, root: Path, od: str, padly: Sequence[str]) 
     """Skrypty mutacji skilli, które padły, według PR-u, który ostatni zmienił folder skilla od ``od``."""
 
     kroki = {f"skill:{krok.key}": krok for krok in mutacje_skilli.steps({})}
-    linia_main = _git(root, "rev-list", "--first-parent", "--reverse", f"{od}..HEAD").split()
+    linia_main = _linia_main(root, od, padly)
     wynik: dict[Autor, list[str]] = {}
     for klucz in padly:
         krok = kroki[klucz]
