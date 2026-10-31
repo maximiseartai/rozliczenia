@@ -485,7 +485,7 @@ def test_zatrzymanie_centrum_nie_czeka_na_budzik_centrum_poprzedniego_testu_nast
         rings.wait()
         threading.Thread(target=next_rings.wait, name="budzik", daemon=True).start()
 
-    # Budzik kolejki Centrum z poprzedniego testu (``SYSTEM_CLOCK``): dzwoni co ``RETRY_S`` i nastawia następny.
+    # Budzik Centrum z poprzedniego testu, który po starcie tego Centrum nastawia następny.
     earlier = threading.Thread(target=ring, name="budzik", daemon=True)
     earlier.start()
     started = plain_centrum(tmp_path)

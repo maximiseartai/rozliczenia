@@ -340,9 +340,8 @@ class CentrumClient(TestClient):
     Na Windows pliku, który wątek Centrum w tle w tej chwili pisze albo czyta, nie da się otworzyć ani usunąć
     (``PermissionError``), więc test dotyka plików Centrum dopiero po ``stop``. Wątki Centrum to wątki z linii, które
     wątek testu zaczął od ``since``, także uruchomione później przez wątki tej linii. Wątek z linii sprzed ``since``
-    należy do Centrum innego testu, nawet gdy powstał po ``since`` (budzik kolejki z ``SYSTEM_CLOCK`` co
-    ``RETRY_S`` uruchamia następny). Centrum po ponownym starcie dostaje ``since`` poprzedniego, żeby ``stop``
-    czekał też na wątki jego poprzedniej pracy.
+    należy do Centrum innego testu, nawet gdy powstał po ``since`` (wątek w tle tamtego Centrum uruchamia następny).
+    Centrum po ponownym starcie dostaje ``since`` poprzedniego, żeby ``stop`` czekał też na wątki jego poprzedniej pracy.
     """
 
     def __init__(self, app: FastAPI, *, since: int | None = None) -> None:
