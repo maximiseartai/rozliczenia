@@ -11,6 +11,8 @@ import sys
 import threading
 from pathlib import Path
 
+import pytest
+
 from rozliczenia.centrum.clock import SYSTEM_CLOCK
 from rozliczenia.centrum.keyed_box import KeyedBox
 
@@ -33,6 +35,11 @@ class SilentBox:
 SYSTEM_CLOCK.after(3600, print)
 KeyedBox(SilentBox(), lambda: "github_pat_SYNTETYCZNY", clock=SYSTEM_CLOCK).check_in_background()
 """
+
+
+@pytest.fixture(autouse=True)
+def bez_budzika_zegara_systemu() -> None:
+    """Ten plik sprawdza prawdziwy budzik, więc nadpisuje strażnika z ``tests/conftest.py``."""
 
 
 def test_budzik_zegara_systemu_budzi_w_innym_watku() -> None:

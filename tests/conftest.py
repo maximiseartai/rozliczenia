@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from fastapi.testclient import TestClient
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from rozliczenia.centrum import report_box, restart_guardian, tool_freshness
+from rozliczenia.centrum import clock, report_box, restart_guardian, tool_freshness
 from rozliczenia.centrum.tool_update import ToolClone
 from rozliczenia.centrum.log import CentrumLog
 
@@ -124,6 +124,26 @@ def bez_skrzynki_zgloszen_na_githubie(monkeypatch: pytest.MonkeyPatch) -> Iterat
     monkeypatch.setattr(report_box, "urllib_transport", github_in_test)
     yield
     assert attempts == [], "Test łączył się ze Skrzynką Zgłoszeń na GitHubie: " + ", ".join(attempts)
+
+
+@pytest.fixture(autouse=True)
+def bez_budzika_zegara_systemu(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Centrum testu nie nastawia prawdziwego budzika: podstaw ``clock`` w create_app.
+
+    Budzik ``SYSTEM_CLOCK`` to ``threading.Timer``, który po teście dalej budzi kolejkę Skrzynki w workerze xdist i
+    nastawia następny, więc zostaje do końca sesji (#87). Nastawia go wątek kolejki, w którym sam ``AssertionError``
+    by przepadł: każda próba jest zapisana, budzik nie startuje, a test pada po swoim końcu. Prawdziwy budzik sprawdza
+    tylko ``tests/test_zegar_centrum.py``, który nadpisuje tę fixture.
+    """
+
+    attempts: list[float] = []
+
+    def alarm_in_test(self: clock.SystemClock, seconds: float, wake: Callable[[], None]) -> None:
+        attempts.append(seconds)
+
+    monkeypatch.setattr(clock.SystemClock, "after", alarm_in_test)
+    yield
+    assert attempts == [], f"Centrum testu nastawiło prawdziwy budzik za {attempts} s; podstaw clock w create_app."
 
 
 @pytest.fixture(autouse=True)

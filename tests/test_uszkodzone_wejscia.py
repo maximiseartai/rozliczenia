@@ -38,6 +38,7 @@ from rozliczenia.centrum.shutdown import Shutdown
 
 from tests.fixtures.centrum import CENTRUM, FakeGitHub, FakeOneDrive, FakePlatform, MetricsPaths, finished_view
 from tests.fixtures.centrum_processes import Engines
+from tests.fixtures.clock import ManualClock
 from tests.fixtures.preparation import PERIOD, write_collective_template, write_internal_template, write_register
 from tests.fixtures.settlement import CellValue, write_quantity_source, write_template
 
@@ -217,6 +218,8 @@ class World:
             platform=platform,
             log=log,
             shutdown=Shutdown(log),
+            # Zegar stoi, więc kolejka Skrzynki bez sieci nie nastawia prawdziwego budzika ponowienia.
+            clock=ManualClock(),
             today=lambda: TODAY,
             configuration_files=ConfigurationFiles(
                 worker_config=self.path("konfiguracja_wykonawcow"),
