@@ -28,9 +28,9 @@ Workflow ``mutacje-nocne.yml`` biegnie raz na dobę na ``main`` i ręcznie (``wo
   skrypt, który padł, linią ``SKRYPT <skrypt>`` do issue ``Przeżyte mutacje skilli z #N`` PR-u, który ostatni zmienił
   folder skilla od bazy (bez takiej zmiany: inną ścieżkę z ``mutacje_skilli.watched``, a dla podstawy z ``pilnuje``,
   a bez niej ostatni PR nocy); linii, którą issue już ma, nie dostaje drugi raz. Zadanie bez zapisu tego planu albo bez wyniku jednostki czerwieni run.
-  Skrypt, który padł, gdy ``main`` nie ma commitu od bazy (podstawę skilla bez ``pilnuje`` noc uruchamia przy każdej
-  zmianie, także pustej), i przeżyta mutacja, której linii nie wniósł commit nocy, nie mają PR-u, więc zgłoszenie
-  kończy się ``MUTACJE NOCNE FAIL`` z przyczyną.
+  Na pustej nocy (``main`` bez commitu od bazy) skrypt, który padł, nie ma PR-u, któremu go zgłosić, a podstawę skilla
+  bez ``pilnuje`` noc uruchamia przy każdej zmianie, także pustej: zgłoszenie kończy się ``MUTACJE NOCNE FAIL`` z
+  przyczyną. Tak samo kończy się przeżyta mutacja, której linii nie wniósł żaden commit nocy.
 
 Bazę i liczbę części nocy drukuje lokalnie bez testów:
 
@@ -260,12 +260,14 @@ def wyniki_skilli(plan: plan_ci.Plan, katalog: Path) -> tuple[list[str], list[st
     return sorted(padly), problemy
 
 
-def przypisz_skrypty(github: GitHub, root: Path, od: str, padly: Sequence[str]) -> dict[Autor, list[str]]:
-    """Skrypty mutacji skilli, które padły, według PR-u, który ostatni zmienił folder skilla od ``od``."""
+def przypisz_skrypty(github: GitHub, root: Path, od: str, padly: Sequence[str]) -> tuple[dict[Autor, list[str]], list[str]]:
+    """Skrypty mutacji skilli, które padły, według PR-u, który ostatni zmienił folder skilla od ``od``, i przyczyny
+    skryptów, których nie ma komu przypisać, bo ``main`` nie ma commitu od ``od``."""
 
     kroki = {f"skill:{krok.key}": krok for krok in mutacje_skilli.steps({})}
     linia_main = _git(root, "rev-list", "--first-parent", "--reverse", f"{od}..HEAD").split()
     wynik: dict[Autor, list[str]] = {}
+    problemy: list[str] = []
     for klucz in padly:
         krok = kroki[klucz]
         folder = f"{krok.skill.relative_to(mutacje_skilli.ROOT).as_posix()}/"
@@ -279,9 +281,10 @@ def przypisz_skrypty(github: GitHub, root: Path, od: str, padly: Sequence[str]) 
             if commit := _git(root, "log", "-1", "--format=%H", f"{od}..HEAD", "--", *grupa):
                 break
         if not commit:
-            raise ValueError(f"padł {krok.command[0]}, a main nie ma od bazy {od} commitu, któremu go przypisać")
+            problemy.append(f"padł {krok.command[0]}, a main nie ma od bazy {od} commitu, któremu go przypisać")
+            continue
         wynik.setdefault(autor(github, root, linia_main[_wniesienie(root, linia_main, commit)], commit), []).append(krok.command[0])
-    return wynik
+    return wynik, problemy
 
 
 @dataclass(frozen=True)
@@ -398,8 +401,9 @@ def zglos(github: GitHub, root: Path, od: str, katalog: Path, liczba: int, run: 
     padly: list[str] = []
     if plan_skilli is not None:
         padly, problemy_skilli = wyniki_skilli(plan_skilli, katalog)
-        problemy += problemy_skilli
-        linie += wykonaj(github, akcje_skryptow(github, przypisz_skrypty(github, root, od, padly), run))
+        przypisane, bez_autora = przypisz_skrypty(github, root, od, padly)
+        problemy += problemy_skilli + bez_autora
+        linie += wykonaj(github, akcje_skryptow(github, przypisane, run))
     print("\n".join(linie) or "MUTACJE NOCNE | nic nowego do zgłoszenia")
     if problemy:
         print(f"MUTACJE NOCNE FAIL | {'; '.join(problemy)}")

@@ -676,21 +676,24 @@ def test_pusta_noc_ze_skryptem_ktory_padl_albo_przezyta_mutacja_konczy_sie_fail_
     (repo / ".agents/skills/verify-d/SKILL.md").write_text(f"---\nname: verify-d\nci: {podstawa}\nci-czesci: 2\n---\n", encoding="utf-8")
     baza = commit(repo, "Dodaj verify-d (#24)")
     klucz = "skill:verify-d/ci"
-    plan = plan_ci.Plan(plan_ci.NOC, 225.0, (), (plan_ci.Zadanie("mutacje-1", "mutacje", "Mutation checks (1/1)", (f"{klucz}#1/2", f"{klucz}#2/2"), 100.0),))
+    zadania = tuple(plan_ci.Zadanie(f"mutacje-{k}", "mutacje", f"Mutation checks ({k}/2)", (f"{klucz}#{k}/2",), 100.0) for k in (1, 2))
+    plan = plan_ci.Plan(plan_ci.NOC, 225.0, (), zadania)
     (tmp_path / "plan.json").write_text(plan.do_json(), encoding="utf-8")
     if co_padlo == "skrypt-skilla":
+        # Zadanie 2/2 nie wgrało zapisu: ta przyczyna zostaje obok przyczyny pustej nocy.
         zapisy, czesci = _wykonania(tmp_path / "zapisy", {"mutacje-1": (plan.digest, {klucz: "fail"})}), "0"
-        przyczyna = f"padł {podstawa}, a main nie ma od bazy {baza} commitu, któremu go przypisać"
+        poczatek, koniec = "Mutation checks (2/2) bez zapisu: ", f"; padł {podstawa}, a main nie ma od bazy {baza} commitu, któremu go przypisać"
     else:
-        # Zapis spoza planu tej nocy: linię mutacji zmienił PR #22 przed bazą.
+        # Pusta noc nie ma zmienionych linii, więc taki zapis to zapis innej bazy: linię mutacji zmienił PR #22 przed bazą.
         zapisy = _zapisy(tmp_path / "zapisy", {1: (PRZEZYLO, [_przezyta("src/a.py:1 stała")])})
-        _wykonania(zapisy, {"mutacje-1": (plan.digest, {klucz: "ok"})})
+        _wykonania(zapisy, {zadanie.id: (plan.digest, {klucz: "ok"}) for zadanie in zadania})
         czesci = "1"
-        przyczyna = f"commit {git(repo, 'rev-parse', 'HEAD~2')} nie wszedł na main od bazy nocy, więc nie ma PR-u, któremu go przypisać"
+        poczatek = koniec = f"commit {git(repo, 'rev-parse', 'HEAD~2')} nie wszedł na main od bazy nocy, więc nie ma PR-u, któremu go przypisać"
 
     kod = mutacje_nocne.main(["zglos", "--baza", baza, "--zapisy", str(zapisy), "--czesci", czesci, "--run", RUN, "--plan-skilli", str(tmp_path / "plan.json")])
 
-    assert (kod, capsys.readouterr().out.splitlines()[-1]) == (1, f"MUTACJE NOCNE FAIL | {przyczyna}")
+    ostatnia = capsys.readouterr().out.splitlines()[-1]
+    assert (kod, ostatnia.startswith(f"MUTACJE NOCNE FAIL | {poczatek}"), ostatnia.endswith(koniec)) == (1, True, True), ostatnia
 
 def test_zadanie_skilli_bez_zapisu_tego_planu_albo_bez_wyniku_jednostki_czerwieni_przebieg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
