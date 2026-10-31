@@ -60,6 +60,20 @@ MUTATIONS = (
         "przy zajętej nazwie shutil.move kopiuje plik i nadpisuje cel",
         "PUBLIKACJA: LUKA MODELU",
     ),
+    Mutation(
+        "prawdziwa blokada spoza modelu w ensure_period_files_absent",
+        (
+            Edit(
+                VERIFIED,
+                "    \"\"\"Nienadpisywanie: żaden z dwóch plików okresu nie istnieje jeszcze w Folderze okresu.\"\"\"\n",
+                "    \"\"\"Nienadpisywanie: żaden z dwóch plików okresu nie istnieje jeszcze w Folderze okresu.\"\"\"\n"
+                "    __import__(\"threading\").Event().wait()\n",
+            ),
+        ),
+        (*EXPLORER, "--scope", "jedno-uruchomienie"),
+        "sprawdzenie wisi do limitu pytest i wygląda w CI jak flaky test (#52)",
+        "PUBLIKACJA: KROK STOI",
+    ),
 )
 
 

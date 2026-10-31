@@ -20,6 +20,8 @@ from types import ModuleType
 
 import pytest
 
+from tests.fixtures.potomne import wait_for
+
 EXPLORER = (
     Path(__file__).resolve().parents[1]
     / ".agents"
@@ -79,13 +81,14 @@ def test_sprawdzenie_publikacji_prowadzi_uruchomienia_bez_watkow_systemu(monkeyp
     explorer = _load_explorer()
     started: list[str] = []
     start = threading.Thread.start
-    checking = threading.current_thread()
+    checking = {threading.current_thread()}
 
     def counted(thread: threading.Thread) -> None:
         # Wątki tła zostawione przez wcześniejsze testy w tym workerze startują swoje wątki same; liczy się tylko to,
-        # co uruchomiło sprawdzenie.
-        if threading.current_thread() is checking:
+        # co uruchomiło sprawdzenie, także z wątku, który samo uruchomiło.
+        if threading.current_thread() in checking:
             started.append(thread.name)
+            checking.add(thread)
         start(thread)
 
     monkeypatch.setattr(threading.Thread, "start", counted)
@@ -93,7 +96,42 @@ def test_sprawdzenie_publikacji_prowadzi_uruchomienia_bez_watkow_systemu(monkeyp
     report = explorer.explore(explorer.SCOPES["jedno-uruchomienie"])
 
     assert report.undisturbed_successes
-    assert started == []
+    # Jeden wątek systemu na cały zakres, z limitem kroku (#52), a nie po jednym na Uruchomienie procesu.
+    assert len(started) == 1
+
+
+def test_blokada_spoza_modelu_w_kodzie_publikacji_konczy_sprawdzenie_krokiem_ktory_stoi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prawdziwa blokada w kodzie publikacji daje po limicie kroku błąd z Uruchomieniem procesu i krokiem (#52).
+
+    Uruchomienia procesu są greenletami jednego wątku systemu, więc blokada spoza modelu zatrzymuje całe sprawdzenie.
+    Bez limitu kroku wisiało ono do limitu 120 s pytest i wyglądało w CI jak flaky test.
+    """
+
+    explorer = _load_explorer()
+    released = threading.Event()
+    ensure_absent = explorer.preparation_files.ensure_period_files_absent
+
+    def ensure_absent_after_real_event(files: object) -> None:
+        released.wait(60)
+        ensure_absent(files)
+
+    monkeypatch.setattr(explorer.preparation_files, "ensure_period_files_absent", ensure_absent_after_real_event)
+    scope = explorer.SCOPES["jedno-uruchomienie"]
+    try:
+        report = explorer.explore(scope, step_limit=1.0)
+    finally:
+        released.set()
+    # Odblokowane sprawdzenie zwija się przy następnym kroku i oddaje podmienione moduły.
+    assert wait_for(lambda: all(thread.name != f"sprawdzenie {scope.name}" for thread in threading.enumerate()))
+
+    outcome = explorer.summarize([report])
+
+    assert outcome.exit_code == 2, "\n".join(outcome.lines)
+    assert outcome.lines[-1].startswith("PUBLIKACJA: KROK STOI (1)")
+    assert any("wątek modelu „u1” nie doszedł od kroku" in line for line in outcome.lines), "\n".join(outcome.lines)
+    assert any("ensure_absent_after_real_event" in line for line in outcome.lines), "\n".join(outcome.lines)
 
 
 class _LimitCzasu(BaseException):

@@ -34,6 +34,10 @@ new version (or with a failure) or with the guardian started. Modelled by hand:
 the server may end at any moment when no HTTP request is in flight; a request that arrived before
 that is served to the end. Any other ``threading`` use in the two files stops the check as LUKA MODELU.
 
+A step that does not come back to the checker within ``STEP_LIMIT_SECONDS`` (the code waits for something outside the
+model or never ends) stops the check as KROK STOI with the modelled thread, its step and its stack
+(``tools/limit_kroku.py``), instead of hanging until pytest's limit (#52).
+
 Schedules that reach a state already explored are cut short: the code is deterministic, so a state
 (each thread's steps so far, every Uruchomienie's flags, the lock and the Events) has the same
 futures every time.
@@ -54,7 +58,9 @@ from typing import Any, Literal
 from greenlet import getcurrent, greenlet  # type: ignore[import-untyped]  # greenlet ships no type hints
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools"))
 
+from limit_kroku import STEP_LIMIT_SECONDS, Heartbeat, Stuck, watched
 from rozliczenia import process_run
 from rozliczenia.centrum import contract, runs, shutdown
 from rozliczenia.centrum.run_view import PREPARATION
@@ -93,6 +99,8 @@ class ModelGap(BaseException):
 # Each modelled thread is a greenlet on the checker's own OS thread. With an OS thread each, every step was a
 # hand-over through the kernel, several hundred thousand per check, and on a CI runner busy with other xdist workers
 # each one waited for a free CPU until the check hit pytest's 120 s limit (#565). A greenlet switch does not wait.
+# The checker cannot preempt a greenlet either, so every switch to a modelled thread and back is a beat of the
+# ``Heartbeat`` that ``explore`` watches from another OS thread.
 
 
 @dataclass
@@ -136,8 +144,9 @@ def _code_location() -> str:
 
 
 class Scheduler:
-    def __init__(self, trace: list[str]) -> None:
+    def __init__(self, trace: list[str], heartbeat: Heartbeat) -> None:
         self.home = getcurrent()  # the checker, which picks every step
+        self.heartbeat = heartbeat
         self.actors: list[Actor] = []
         self.trace = trace
         self.gaps: list[str] = []
@@ -193,7 +202,9 @@ class Scheduler:
 
         while (actor := next((actor for actor in self.actors if actor.status == "running"), None)) is not None:
             assert actor.greenlet is not None
+            self.heartbeat.entering(actor.name, _resumes_from(actor))
             actor.greenlet.switch()
+            self.heartbeat.left()
 
     def release(self, actor: Actor, outcome: str) -> None:
         actor.status = "running"
@@ -204,6 +215,15 @@ class Scheduler:
             if actor.status == "parked":
                 self.release(actor, _ABORT)
         self.settle()
+
+
+def _resumes_from(actor: Actor) -> str:
+    if actor.pending is None:
+        return "początek wątku"
+    if actor.go == _ABORT:
+        return f"{actor.pending.call} [{actor.pending.where}], gdy harmonogram się kończy"
+    detail = f" → {actor.go}" if actor.go else ""
+    return f"{actor.pending.call}{detail} [{actor.pending.where}]"
 
 
 # --- Model primitives in place of ``threading`` inside runs.py and shutdown.py --------------------------
@@ -788,7 +808,7 @@ def _state(world: World) -> object:
     )
 
 
-def execute(scope: Scope, prefix: Sequence[int], visited: set[object]) -> Execution:
+def execute(scope: Scope, prefix: Sequence[int], visited: set[object], heartbeat: Heartbeat) -> Execution:
     picks: list[int] = []
     widths: list[int] = []
     trace: list[str] = []
@@ -799,7 +819,7 @@ def execute(scope: Scope, prefix: Sequence[int], visited: set[object]) -> Execut
         widths.append(count)
         return index
 
-    scheduler = Scheduler(trace)
+    scheduler = Scheduler(trace, heartbeat)
     try:
         with harness(scheduler) as world:
             cut = _drive(world, scope, choose, picks, len(prefix), visited)
@@ -922,6 +942,7 @@ class ScopeReport:
     restores_done: int = 0
     counterexamples: dict[tuple[object, ...], tuple[Violation, list[str]]] = field(default_factory=dict)
     gaps: dict[str, list[str]] = field(default_factory=dict)
+    stuck: Stuck | None = None
 
     def vacuous(self) -> list[str]:
         """Behaviour every scope must reach, or the check could pass without testing anything."""
@@ -950,13 +971,20 @@ class ScopeReport:
         return missing
 
 
-def explore(scope: Scope) -> ScopeReport:
+def explore(scope: Scope, *, step_limit: float = STEP_LIMIT_SECONDS) -> ScopeReport:
+    """Every schedule of ``scope``, in one OS thread whose steps come back within ``step_limit`` seconds."""
+
+    report = watched(lambda heartbeat: _explore(scope, heartbeat), limit=step_limit, name=f"sprawdzenie {scope.name}")
+    return ScopeReport(scope, stuck=report) if isinstance(report, Stuck) else report
+
+
+def _explore(scope: Scope, heartbeat: Heartbeat) -> ScopeReport:
     report = ScopeReport(scope)
     visited: set[object] = set()
     started = time.perf_counter()
     prefix: list[int] | None = []
     while prefix is not None:
-        execution = execute(scope, prefix, visited)
+        execution = execute(scope, prefix, visited, heartbeat)
         report.schedules += 1
         report.clean_closes += execution.clean_close
         report.closes_refused += execution.close_refused
@@ -995,11 +1023,12 @@ class Outcome:
     known_findings: int
     gaps: int
     vacuous: int
+    stuck: int
     lines: list[str]
 
     @property
     def exit_code(self) -> int:
-        if self.gaps:
+        if self.gaps or self.stuck:
             return 2
         return 1 if self.new_violations or self.vacuous else 0
 
@@ -1009,10 +1038,15 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
         "Jedno Uruchomienie naraz i brak zamknięcia Centrum w trakcie pracy: sprawdzenie wyczerpujące",
         "",
     ]
-    new = known = gaps = vacuous = 0
+    new = known = gaps = vacuous = stuck = 0
     shown: dict[tuple[object, ...], str] = {}
     for report in reports:
         lines.append(f"zakres {report.scope.name}: {report.scope.describe()}")
+        if report.stuck is not None:
+            stuck += 1
+            lines.extend(f"  {line}" for line in report.stuck.lines())
+            lines.append("")
+            continue
         lines.append(
             f"  harmonogramy: {report.schedules}, różne stany: {report.states}, "
             f"zamknięcia bez trwającego Uruchomienia: {report.clean_closes}, czas: {report.seconds:.1f} s"
@@ -1038,7 +1072,9 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
             shown[signature] = report.scope.name
             lines.extend(f"    {number}. {step}" for number, step in enumerate(trace, start=1))
         lines.append("")
-    if gaps:
+    if stuck:
+        lines.append(f"URUCHOMIENIA: KROK STOI ({stuck}): kod pod sprawdzeniem czeka na coś spoza modelu, bez werdyktu.")
+    elif gaps:
         lines.append(f"URUCHOMIENIA: LUKA MODELU ({gaps}): kod używa threading w sposób, którego model nie obejmuje.")
     elif new or vacuous:
         lines.append(f"URUCHOMIENIA: NOWE NARUSZENIE ({new + vacuous})")
@@ -1046,7 +1082,7 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
         lines.append(f"URUCHOMIENIA OK, ZNANE USTALENIA: {known}")
     else:
         lines.append("URUCHOMIENIA OK")
-    return Outcome(new, known, gaps, vacuous, lines)
+    return Outcome(new, known, gaps, vacuous, stuck, lines)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

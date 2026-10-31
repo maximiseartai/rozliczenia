@@ -4,6 +4,7 @@ description: Exhaustively check that Przygotowanie pliku zbiorczego publishes Ro
 pilnuje:
   - src/rozliczenia/preparation_files.py
   - src/rozliczenia/collective_preparation.py
+  - tools/limit_kroku.py
 ci: .agents/skills/verify-publikacja-plikow-okresu/scripts/explore_publication.py
 ---
 
@@ -86,6 +87,7 @@ The last line is the verdict:
 | `PUBLIKACJA OK, ZNANE USTALENIA: n, ZAAKCEPTOWANE RYZYKA: m` | 0 | Only the known findings and accepted risks below, each printed with its counterexample. A count of zero is left out. |
 | `PUBLIKACJA: NOWE NARUSZENIE (n)` | 1 | A rule breaks in a way not listed below, or `BRAK_PUBLIKACJI`: with no errors, kills, or Dad actions, nothing was ever published. |
 | `PUBLIKACJA: LUKA MODELU (n)` | 2 | The code made a filesystem call the in-memory disk does not model. No verdict on the rules. |
+| `PUBLIKACJA: KROK STOI (n)` | 2 | In n scopes a run did not come back to the checker within 10 s of a step: the code waits for something outside the model or never ends. No verdict on the rules. |
 
 `--scope jedno-uruchomienie` or `--scope dwa-uruchomienia` runs one scope.
 `--strict` counts known findings and accepted risks as violations too.
@@ -95,7 +97,10 @@ The last line is the verdict:
 The script runs the real `write_period_files()` in modelled runs against an in-memory
 disk with Windows semantics. Each run is a greenlet on the script's one OS thread, so a busy
 CI runner slows the check only by its share of a CPU, not by a kernel thread switch at every
-step. On the disk `os.rename` never replaces an existing target, and
+step. The checker cannot preempt a greenlet, so the script runs each scope in one OS thread of
+its own and watches its steps from another (`tools/limit_kroku.py`): a step that does not come
+back within 10 s ends the scope as `KROK STOI` instead of hanging until pytest's 120 s limit,
+where it looked like a flaky test (#52). On the disk `os.rename` never replaces an existing target, and
 `os.replace` replaces a file but never a folder. Every filesystem call is one
 indivisible step, the same as one call in the code. Before each step the
 checker tries every possibility: the other run moves first, Dad acts first, the
@@ -177,6 +182,11 @@ is the code that made the call. Then sort it into one of three cases:
   and `VirtualDisk` with its Windows behaviour, or ask whether the code should
   avoid it. Never reword a rule or shrink a scope to make a real counterexample
   disappear.
+- **KROK STOI**: the line names the run, the step it went on from and its stack,
+  whose last frames are the call that blocks. A wait the harness does not replace
+  (a real lock, `time.sleep`, a network call) is a step the model does not have:
+  replace it in `harness()` or model it on the disk. A loop that never ends is a
+  real bug of the publication code.
 
 ## After changing the checker or an intended change to the publication code
 
@@ -192,7 +202,8 @@ py -3 .agents\skills\verify-publikacja-plikow-okresu\scripts\check_publication_m
 It must end with `MUTACJE OK`: `os.replace` instead of `os.rename`, a removed
 rollback, a failed rollback reported as plain `BLAD_ZAPISU`, recording a file
 for rollback before it is moved, and a failed staging cleanup reported as
-`BLAD_ZAPISU` all give `NOWE NARUSZENIE`. `shutil.move` gives `LUKA MODELU`. A mutation reported as
+`BLAD_ZAPISU` all give `NOWE NARUSZENIE`. `shutil.move` gives `LUKA MODELU`, and a real
+`threading.Event().wait()` in `ensure_period_files_absent` gives `KROK STOI` after 10 s. A mutation reported as
 `NIEAKTUALNA` no longer matches `preparation_files.py`. Rewrite its `anchor` and
 `replacement` in `check_publication_mutations.py` against the new code so it breaks the same
 rule again. If the publication code moves to another file, update

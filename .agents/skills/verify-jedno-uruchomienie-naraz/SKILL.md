@@ -8,6 +8,7 @@ pilnuje:
   - src/rozliczenia/centrum/app.py
   - src/rozliczenia/centrum/tool_updates.py
   - src/rozliczenia/centrum/intermax_run.py
+  - tools/limit_kroku.py
 ci: .agents/skills/verify-jedno-uruchomienie-naraz/scripts/explore_runs.py
 ---
 
@@ -107,6 +108,7 @@ script checks the worktree's own `src`.
 | `URUCHOMIENIA OK, ZNANE USTALENIA: n` | 0 | Only the known findings below, each printed with its counterexample. |
 | `URUCHOMIENIA: NOWE NARUSZENIE (n)` | 1 | A rule breaks in a way not listed below, or a scope never reached a behaviour it must reach (`BRAK_ZAMKNIECIA`, `BRAK_ODMOWY_ZAMKNIECIA`, `BRAK_WYNIKU`, `BRAK_ODMOWY_STARTU`), so the check would prove nothing. |
 | `URUCHOMIENIA: LUKA MODELU (n)` | 2 | `runs.py` or `shutdown.py` uses `threading` in a way the model does not cover (for example `RLock`, `Condition`, `wait(timeout=...)`). No verdict on the rules. |
+| `URUCHOMIENIA: KROK STOI (n)` | 2 | In n scopes a modelled thread did not come back to the checker within 10 s of a step: the code waits for something outside the model or never ends. No verdict on the rules. |
 
 `--scope zamknij-w-trakcie`, `--scope dwie-karty`, `--scope aktualizacja` or `--scope przywracanie` runs one scope. `--strict`
 counts known findings as violations too: use it to confirm a fix.
@@ -117,7 +119,10 @@ The script runs the real `RunHost` and `Shutdown`, wired as in `create_app`, in
 modelled threads. FastAPI runs the sync handlers `startRun`, `decideRun` and `closeCentrum`
 in a thread pool, so tabs really do run in parallel. Each modelled thread is a
 greenlet on the script's one OS thread, so a busy CI runner slows the check only by
-its share of a CPU, not by a kernel thread switch at every step (#565). Inside `runs.py` and
+its share of a CPU, not by a kernel thread switch at every step (#565). The checker cannot preempt a greenlet, so
+the script runs each scope in one OS thread of its own and watches its steps from another (`tools/limit_kroku.py`):
+a step that does not come back within 10 s ends the scope as `KROK STOI` instead of hanging until pytest's 120 s
+limit, where it looked like a flaky test (#52). Inside `runs.py` and
 `shutdown.py`, `threading` is replaced by model primitives: entering
 `RunHost._lock`, each `Event.set`/`clear`/`wait` and starting the Uruchomienie
 thread is one indivisible step, as is each Centrum log entry and
@@ -190,6 +195,12 @@ requests, `wątek Uruchomienie n` is the thread `RunHost.start` spawned,
   real semantics (a step per entry or signal, and a step that can go only when
   it would not block), or ask whether the code should avoid it. Never reword a
   rule or shrink a scope to make a real counterexample disappear.
+- **KROK STOI**: the line names the modelled thread, the step it went on from and
+  its stack, whose last frames are the call that blocks. A wait outside `runs.py`
+  and `shutdown.py` (a lock or queue of another module, `time.sleep`, a file or
+  network call) is a step the model does not have: replace it in the harness, as
+  `CentrumLog` is, or model it in `ModelThreading`. A loop that never ends is a real
+  bug of the covered code.
 
 ## After changing the checker or an intended change to the covered code
 
@@ -210,7 +221,8 @@ the actions after the result moved below `ended = True`,
 `Shutdown.request` without the refusal, an accepted shutdown that does not set
 `_closing`, `begin_update` without the closing or the running check, `start`
 without the updating check, `begin_restore` without the running check,
-`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`.
+`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`,
+and a real `threading.Event().wait()` in `RunHost.start` gives `KROK STOI` after 10 s.
 CI runs this in the `mutations` job. A mutation reported as `NIEAKTUALNA` no longer matches its file.
 Rewrite its `anchor` and `replacement` in `check_runs_mutations.py` so it breaks
 the same rule again in the new code. Then move the sync commit forward as above.

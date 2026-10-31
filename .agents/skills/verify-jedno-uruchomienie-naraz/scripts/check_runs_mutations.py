@@ -111,6 +111,19 @@ MUTATIONS = (
         "URUCHOMIENIA: NOWE NARUSZENIE",
     ),
     Mutation(
+        "prawdziwa blokada spoza modelu w RunHost.start",
+        (
+            Edit(
+                RUNS,
+                "    def start(self, prepared: PreparedRun[Any, Any]) -> contract.RunView:\n",
+                "    def start(self, prepared: PreparedRun[Any, Any]) -> contract.RunView:\n        __import__(\"threading\").Event().wait()\n",
+            ),
+        ),
+        (EXPLORER, "--scope", "zamknij-w-trakcie"),
+        "sprawdzenie wisi do limitu pytest i wygląda w CI jak flaky test (#52)",
+        "URUCHOMIENIA: KROK STOI",
+    ),
+    Mutation(
         "RLock zamiast Lock w RunHost",
         (Edit(RUNS, "        self._lock = threading.Lock()\n", "        self._lock = threading.RLock()\n"),),
         (EXPLORER, "--scope", "zamknij-w-trakcie"),

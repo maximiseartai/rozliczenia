@@ -18,7 +18,10 @@ Only two things are replaced: workbook writing (``_write_period_file``) by a ste
 that creates the staged file, and ``tempfile.TemporaryDirectory`` by a directory
 on the in-memory disk whose removal is one step that may fail, as when OneDrive
 holds the folder. A filesystem call that the in-memory disk does not model
-stops the check as LUKA MODELU instead of passing silently.
+stops the check as LUKA MODELU instead of passing silently. A step that does not come
+back to the checker within ``STEP_LIMIT_SECONDS`` (the code waits for something outside
+the model or never ends) stops the check as KROK STOI with the Uruchomienie procesu, its
+step and its stack (``tools/limit_kroku.py``), instead of hanging until pytest's limit (#52).
 
 Schedules that reach a state already explored are cut short: the code is
 deterministic, so a state (disk contents, what each Uruchomienie procesu has
@@ -47,7 +50,9 @@ from typing import Any, Literal
 from greenlet import getcurrent, greenlet  # type: ignore[import-untyped]  # greenlet ships no type hints
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools"))
 
+from limit_kroku import STEP_LIMIT_SECONDS, Heartbeat, Stuck, watched
 from rozliczenia import preparation_files
 from rozliczenia.period_folder import PeriodFolder
 from rozliczenia.settlement_period import parse_period_token
@@ -218,7 +223,8 @@ class VirtualDisk:
 # Each Uruchomienie procesu is a greenlet on the checker's own OS thread. With an OS thread each, every step was a
 # hand-over through the kernel, 140 thousand per check, and on a Windows runner with Python 3.11 busy with other
 # xdist workers each one waited for a free CPU until the check hit pytest's 120 s limit. A greenlet switch does not
-# wait.
+# wait. The checker cannot preempt a greenlet either, so every switch to an Uruchomienie procesu and back is a beat of
+# the ``Heartbeat`` that ``explore`` watches from another OS thread.
 
 
 @dataclass
@@ -274,9 +280,10 @@ def _code_location() -> str:
 
 
 class Scheduler:
-    def __init__(self, disk: VirtualDisk) -> None:
+    def __init__(self, disk: VirtualDisk, heartbeat: Heartbeat) -> None:
         self.disk = disk
         self.home = getcurrent()  # the checker, which picks every step
+        self.heartbeat = heartbeat
         self.probe_calls: list[str] | None = None
 
     def step(
@@ -334,7 +341,10 @@ class Scheduler:
         while (run := next((run for run in runs if run.status == "running"), None)) is not None:
             assert run.greenlet is not None
             self.disk.actor = run.name
+            resumes = "początek Uruchomienia" if run.pending is None else run.pending.describe(run.name)
+            self.heartbeat.entering(run.name, f"{resumes} → {run.go}" if run.go else resumes)
             run.greenlet.switch()
+            self.heartbeat.left()
 
     def release(self, run: Run, outcome: str) -> None:
         run.status = "running"
@@ -530,7 +540,7 @@ def probe_interception() -> list[str]:
 
     layout = make_layout()
     disk = VirtualDisk(layout.disk_root, short_names(0))
-    scheduler = Scheduler(disk)
+    scheduler = Scheduler(disk, Heartbeat())
     scheduler.probe_calls = []
     folder = layout.disk_root / "folder"
     problems: list[str] = []
@@ -768,7 +778,7 @@ def _razem_albo_zaden(run: Run, layout: Layout, owned: tuple[str, ...]) -> Viola
     )
 
 
-def execute(scope: Scope, prefix: Sequence[int], visited: set[object]) -> Execution:
+def execute(scope: Scope, prefix: Sequence[int], visited: set[object], heartbeat: Heartbeat) -> Execution:
     picks: list[int] = []
     widths: list[int] = []
     trace: list[str] = []
@@ -781,7 +791,7 @@ def execute(scope: Scope, prefix: Sequence[int], visited: set[object]) -> Execut
 
     layout = make_layout()
     disk = VirtualDisk(layout.disk_root, short_names(scope.runs))
-    scheduler = Scheduler(disk)
+    scheduler = Scheduler(disk, heartbeat)
     initial_state = scope.initial_states[choose(len(scope.initial_states))]
     prepare_disk(disk, layout, initial_state)
     trace.append(f"stan początkowy: {initial_state}")
@@ -886,15 +896,23 @@ class ScopeReport:
         default_factory=dict
     )
     gaps: dict[str, list[str]] = field(default_factory=dict)
+    stuck: Stuck | None = None
 
 
-def explore(scope: Scope) -> ScopeReport:
+def explore(scope: Scope, *, step_limit: float = STEP_LIMIT_SECONDS) -> ScopeReport:
+    """Every schedule of ``scope``, in one OS thread whose steps come back within ``step_limit`` seconds."""
+
+    report = watched(lambda heartbeat: _explore(scope, heartbeat), limit=step_limit, name=f"sprawdzenie {scope.name}")
+    return ScopeReport(scope, stuck=report) if isinstance(report, Stuck) else report
+
+
+def _explore(scope: Scope, heartbeat: Heartbeat) -> ScopeReport:
     report = ScopeReport(scope)
     visited: set[object] = set()
     started = time.perf_counter()
     prefix: list[int] | None = []
     while prefix is not None:
-        execution = execute(scope, prefix, visited)
+        execution = execute(scope, prefix, visited, heartbeat)
         report.schedules += 1
         report.successes += execution.successes
         report.undisturbed_successes += execution.undisturbed_success
@@ -919,21 +937,27 @@ class Outcome:
     accepted_risks: int
     gaps: int
     vacuous: int
+    stuck: int
     lines: list[str]
 
     @property
     def exit_code(self) -> int:
-        if self.gaps:
+        if self.gaps or self.stuck:
             return 2
         return 1 if self.new_violations or self.vacuous else 0
 
 
 def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcome:
     lines = ["Publikacja plików okresu (Przygotowanie pliku zbiorczego): sprawdzenie wyczerpujące", ""]
-    new = known = accepted = gaps = vacuous = 0
+    new = known = accepted = gaps = vacuous = stuck = 0
     shown: dict[tuple[object, ...], str] = {}
     for report in reports:
         lines.append(f"zakres {report.scope.name}: {report.scope.describe()}")
+        if report.stuck is not None:
+            stuck += 1
+            lines.extend(f"  {line}" for line in report.stuck.lines())
+            lines.append("")
+            continue
         lines.append(
             f"  harmonogramy: {report.schedules}, różne stany: {report.states}, "
             f"udane publikacje: {report.successes}, czas: {report.seconds:.1f} s"
@@ -963,7 +987,9 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
             shown[signature] = report.scope.name
             lines.extend(f"    {number}. {step}" for number, step in enumerate(trace, start=1))
         lines.append("")
-    if gaps:
+    if stuck:
+        lines.append(f"PUBLIKACJA: KROK STOI ({stuck}): kod pod sprawdzeniem czeka na coś spoza modelu, bez werdyktu.")
+    elif gaps:
         lines.append(f"PUBLIKACJA: LUKA MODELU ({gaps}): kod używa wywołania, którego dysk w pamięci nie modeluje.")
     elif new or vacuous:
         lines.append(f"PUBLIKACJA: NOWE NARUSZENIE ({new + vacuous})")
@@ -973,7 +999,7 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
         lines.append(f"PUBLIKACJA OK, {', '.join(counts)}")
     else:
         lines.append("PUBLIKACJA OK")
-    return Outcome(new, known, accepted, gaps, vacuous, lines)
+    return Outcome(new, known, accepted, gaps, vacuous, stuck, lines)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
