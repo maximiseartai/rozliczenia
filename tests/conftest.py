@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+import functools
 import json
 from pathlib import Path
 import sys
@@ -126,23 +127,35 @@ def bez_skrzynki_zgloszen_na_githubie(monkeypatch: pytest.MonkeyPatch) -> Iterat
     assert attempts == [], "Test łączył się ze Skrzynką Zgłoszeń na GitHubie: " + ", ".join(attempts)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def proby_budzika_zegara_systemu() -> Iterator[list[float]]:
+    """Przez całą sesję ``SystemClock.after`` tylko zapisuje próbę, więc budzik nie startuje także z fixture'a sesji
+    ani z wątku kolejki, który skończył się po teście; ``inspect.unwrap`` daje prawdziwy budzik."""
+
+    attempts: list[float] = []
+
+    @functools.wraps(clock.SystemClock.after)
+    def alarm_in_test(self: clock.SystemClock, seconds: float, wake: Callable[[], None]) -> None:
+        attempts.append(seconds)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(clock.SystemClock, "after", alarm_in_test)
+        yield attempts
+
+
 @pytest.fixture(autouse=True)
-def bez_budzika_zegara_systemu(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def bez_budzika_zegara_systemu(proby_budzika_zegara_systemu: list[float]) -> Iterator[None]:
     """Centrum testu nie nastawia prawdziwego budzika: podstaw ``clock`` w create_app.
 
     Budzik ``SYSTEM_CLOCK`` to ``threading.Timer``, który po teście dalej budzi kolejkę Skrzynki w workerze xdist i
     nastawia następny, więc zostaje do końca sesji (#87). Nastawia go wątek kolejki, w którym sam ``AssertionError``
-    by przepadł: każda próba jest zapisana, budzik nie startuje, a test pada po swoim końcu. Prawdziwy budzik sprawdza
-    tylko ``tests/test_zegar_centrum.py``, który nadpisuje tę fixture.
+    by przepadł: test pada po swoim końcu z każdą próbą od końca poprzedniego testu, także z fixture'a sesji, który
+    ustawił. Prawdziwy budzik sprawdza tylko ``tests/test_zegar_centrum.py``, który nadpisuje tę fixture.
     """
 
-    attempts: list[float] = []
-
-    def alarm_in_test(self: clock.SystemClock, seconds: float, wake: Callable[[], None]) -> None:
-        attempts.append(seconds)
-
-    monkeypatch.setattr(clock.SystemClock, "after", alarm_in_test)
     yield
+    attempts = list(proby_budzika_zegara_systemu)
+    proby_budzika_zegara_systemu.clear()
     assert attempts == [], f"Centrum testu nastawiło prawdziwy budzik za {attempts} s; podstaw clock w create_app."
 
 

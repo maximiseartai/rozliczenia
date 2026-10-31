@@ -5,6 +5,7 @@ Testy Centrum podstawiają ``ManualClock``, więc prawdziwy budzik i wątek spra
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from rozliczenia.centrum.clock import SYSTEM_CLOCK
+from rozliczenia.centrum.clock import SYSTEM_CLOCK, SystemClock
 from rozliczenia.centrum.keyed_box import KeyedBox
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,8 +39,10 @@ KeyedBox(SilentBox(), lambda: "github_pat_SYNTETYCZNY", clock=SYSTEM_CLOCK).chec
 
 
 @pytest.fixture(autouse=True)
-def bez_budzika_zegara_systemu() -> None:
+def bez_budzika_zegara_systemu(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ten plik sprawdza prawdziwy budzik, więc nadpisuje strażnika z ``tests/conftest.py``."""
+
+    monkeypatch.setattr(SystemClock, "after", inspect.unwrap(SystemClock.after))
 
 
 def test_budzik_zegara_systemu_budzi_w_innym_watku() -> None:
