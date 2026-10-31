@@ -659,6 +659,38 @@ def test_czesc_podstawy_skilla_bez_pilnuje_ktorego_folder_sie_nie_zmienil_trafia
     assert [issue["title"] for issue in github.issues] == ["Przeżyte mutacje skilli z #26"]
     assert f"SKRYPT {podstawa}\n" in github.issues[0]["body"]
 
+
+def test_skrypt_ktory_padl_w_nocy_bez_commitow_czerwieni_przebieg_z_przyczyna_a_noc_bez_porazki_przechodzi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo, _ = _historia_skilli(tmp_path)
+    for modul in (mutacje_nocne, mutacje_skilli):
+        monkeypatch.setattr(modul, "ROOT", repo)
+    monkeypatch.setattr(mutacje_skilli, "SKILLS", repo / ".agents" / "skills")
+    github = GitHubWPamieci()
+    monkeypatch.setattr(mutacje_nocne, "GhApi", lambda: github)
+    # Bazą nocy jest HEAD: od ostatniej udanej nocy nikt nic nie scalił, a podstawa bez pilnuje biegnie każdej nocy.
+    baza = git(repo, "rev-parse", "HEAD")
+    plan = tmp_path / "plan-skilli" / "plan.json"
+    plan.parent.mkdir()
+    plan.write_text(PLAN_SKILLI.do_json(), encoding="utf-8")
+
+    def noc(katalog: str, skrypt_a: str) -> tuple[int, list[str]]:
+        zapisy = _wykonania(tmp_path / katalog, {"mutacje-1": (PLAN_SKILLI.digest, {SKRYPT_A: skrypt_a}), "mutacje-2": (PLAN_SKILLI.digest, {SKRYPT_A: "ok", SKRYPT_B: "ok"})})
+        kod = mutacje_nocne.main(["zglos", "--baza", baza, "--zapisy", str(zapisy), "--czesci", "0", "--run", RUN, "--plan-skilli", str(plan)])
+        return kod, capsys.readouterr().out.splitlines()
+
+    assert noc("padl", "fail") == (
+        1,
+        [
+            f"MUTACJE NOCNE FAIL | noc od {baza} nie ma commitów, którym przypisać skrypty, które padły: "
+            ".agents/skills/verify-a/scripts/check_a_mutations.py"
+        ],
+    )
+    assert noc("przeszly", "ok") == (0, ["MUTACJE NOCNE | nic nowego do zgłoszenia", "MUTACJE NOCNE OK | części 0 | przeżyło 0 | zadania skilli 2 | padło skryptów 0"])
+    assert github.wyslane == []
+
+
 def test_zadanie_skilli_bez_zapisu_tego_planu_albo_bez_wyniku_jednostki_czerwieni_przebieg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

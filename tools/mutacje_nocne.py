@@ -27,7 +27,8 @@ Workflow ``mutacje-nocne.yml`` biegnie raz na dobę na ``main`` i ręcznie (``wo
   planu wgrywa swój zapis wykonania jako artefakt ``mutacje-skilli-<id zadania>``. ``zglos --plan-skilli`` daje każdy
   skrypt, który padł, linią ``SKRYPT <skrypt>`` do issue ``Przeżyte mutacje skilli z #N`` PR-u, który ostatni zmienił
   folder skilla od bazy (bez takiej zmiany: inną ścieżkę z ``mutacje_skilli.watched``, a dla podstawy z ``pilnuje``,
-  a bez niej ostatni PR nocy); linii, którą issue już ma, nie dostaje drugi raz. Zadanie bez zapisu tego planu albo bez wyniku jednostki czerwieni run.
+  a bez niej ostatni PR nocy); linii, którą issue już ma, nie dostaje drugi raz. Skrypt, który padł w nocy bez commitów,
+  nie ma PR-u, więc czerwieni run z przyczyną. Zadanie bez zapisu tego planu albo bez wyniku jednostki czerwieni run.
 
 Bazę i liczbę części nocy drukuje lokalnie bez testów:
 
@@ -259,6 +260,9 @@ def przypisz_skrypty(github: GitHub, root: Path, od: str, padly: Sequence[str]) 
 
     kroki = {f"skill:{krok.key}": krok for krok in mutacje_skilli.steps({})}
     linia_main = _git(root, "rev-list", "--first-parent", "--reverse", f"{od}..HEAD").split()
+    if padly and not linia_main:
+        # Bez commitów nocy nikt nie zmienił skilla, więc porażka nie ma PR-u, a zielony run by ją schował.
+        raise ValueError(f"noc od {od} nie ma commitów, którym przypisać skrypty, które padły: {', '.join(kroki[klucz].command[0] for klucz in padly)}")
     wynik: dict[Autor, list[str]] = {}
     for klucz in padly:
         krok = kroki[klucz]
