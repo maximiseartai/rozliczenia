@@ -134,12 +134,14 @@ def test_konfiguracja_pokazuje_niedostepny_wzorzec_i_wzorzec_z_danymi_jako_niecz
     write_template(files.worker_template)
     damage(config / file_name, monkeypatch)
     log = CentrumLog(tmp_path / "logs" / "centrum-rozliczen.log")
+    clock = ManualClock()
     app = create_app(
         settings_path=config / "centrum-ustawienia.yaml",
         platform=FakePlatform(),
         log=log,
         shutdown=Shutdown(log),
-        clock=ManualClock(),
+        clock=clock,
+        pause=clock.pause,
         configuration_files=files,
         tool_freshness=FakeGitHub().freshness(),
     )

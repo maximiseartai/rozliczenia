@@ -56,12 +56,14 @@ def configured(tmp_path: Path, github: FakeGitHub | None = None, readers: Reader
     )
     write_template(files.worker_template)
     log = CentrumLog(tmp_path / "logs" / "centrum-rozliczen.log")
+    clock = ManualClock()
     app = create_app(
         settings_path=config / "centrum-ustawienia.yaml",
         platform=FakePlatform(),
         log=log,
         shutdown=Shutdown(log),
-        clock=ManualClock(),
+        clock=clock,
+        pause=clock.pause,
         configuration_files=files,
         tool_freshness=(github or FakeGitHub()).freshness(),
         readers=readers,

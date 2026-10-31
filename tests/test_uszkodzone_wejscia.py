@@ -220,6 +220,7 @@ class World:
 
     def app(self) -> FastAPI:
         log = CentrumLog(self.path("dziennik_centrum"))
+        clock = ManualClock()
         # Drugie wskazanie dostaje wejście chooseRegister albo choosePeriodsDirectory po _remembering_choices.
         platform = FakePlatform(
             chosen_files=[self.path("rejestr")] * 2, chosen_folders=[self.path("folder_okresow")] * 2
@@ -229,7 +230,8 @@ class World:
             platform=platform,
             log=log,
             shutdown=Shutdown(log),
-            clock=ManualClock(),
+            clock=clock,
+            pause=clock.pause,
             today=lambda: TODAY,
             configuration_files=ConfigurationFiles(
                 worker_config=self.path("konfiguracja_wykonawcow"),
