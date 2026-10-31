@@ -82,8 +82,9 @@ def test_blokada_spoza_modelu_konczy_sprawdzenie_bledem_z_watkiem_i_krokiem_zami
     """Kod pod sprawdzeniem zatrzymany na prawdziwej blokadzie nie wygląda w CI jak flaky test (#91).
 
     Bez limitu kroku sprawdzenie wisiało do limitu 120 s pytest, tak jak przy flaky teście z #565. Gdy blokada
-    kiedyś puści, porzucone sprawdzenie staje na następnym kroku i nie zaczyna nowego harmonogramu w tle, a moduły
-    Centrum od razu wracają do prawdziwego ``threading``, żeby następne testy w tym workerze go nie dzieliły.
+    kiedyś puści, porzucone sprawdzenie staje na następnym kroku, nie uruchamia prawdziwego wątku Uruchomienia i nie
+    zaczyna nowego harmonogramu w tle, a moduły Centrum od razu wracają do prawdziwego ``threading``, żeby następne
+    testy w tym workerze go nie dzieliły.
     """
 
     explorer = _load_explorer()
@@ -91,13 +92,20 @@ def test_blokada_spoza_modelu_konczy_sprawdzenie_bledem_z_watkiem_i_krokiem_zami
     publish = runs.RunHost._publish_locked
     calls: list[contract.RunView] = []
     host_init = runs.RunHost.__init__
-    hosts_after_release: list[runs.RunHost] = []
+    start = threading.Thread.start
+    after_release: list[str] = []
 
     def counted_host(host: runs.RunHost, *args: object, **kwargs: object) -> None:
         # Każdy harmonogram tworzy swój RunHost, więc RunHost po zwolnieniu blokady to nowy harmonogram w tle.
         if released.is_set():
-            hosts_after_release.append(host)
+            after_release.append("RunHost")
         host_init(host, *args, **kwargs)  # type: ignore[arg-type]
+
+    def counted_start(thread: threading.Thread) -> None:
+        # Po przywróceniu modułów RunHost.start dostaje prawdziwe threading, więc wątek Uruchomienia byłby wątkiem systemu.
+        if released.is_set() and thread.name.startswith("uruchomienie-"):
+            after_release.append(thread.name)
+        start(thread)
 
     def blocked(host: runs.RunHost, view: contract.RunView) -> None:
         calls.append(view)
@@ -106,6 +114,7 @@ def test_blokada_spoza_modelu_konczy_sprawdzenie_bledem_z_watkiem_i_krokiem_zami
 
     monkeypatch.setattr(runs.RunHost, "_publish_locked", blocked)
     monkeypatch.setattr(runs.RunHost, "__init__", counted_host)
+    monkeypatch.setattr(threading.Thread, "start", counted_start)
     try:
         with pytest.raises(explorer.Hang) as hang:
             explorer.explore(explorer.SCOPES["zamknij-w-trakcie"], step_limit=2)
@@ -115,7 +124,7 @@ def test_blokada_spoza_modelu_konczy_sprawdzenie_bledem_z_watkiem_i_krokiem_zami
 
     assert wait_for(lambda: not any(thread.name.startswith("sprawdzenie przeplotów") for thread in threading.enumerate()))
     assert len(calls) == 1
-    assert hosts_after_release == []
+    assert after_release == []
     message = str(hang.value)
     assert "Wątek modelu „karta Uruchom 1” nie doszedł do kolejnego kroku po kroku „wejście w blokadę RunHost._lock”" in message
     assert "[runs.py:" in message and " start]" in message
