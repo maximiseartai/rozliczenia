@@ -454,7 +454,7 @@ FLAKY = (
     ids=["flaky test", "dwie porazki", "pominiety po ponowieniu"],
 )
 def test_bramka_ponawia_raz_test_ktory_padl_a_przejscie_po_ponowieniu_to_flaky_test_a_druga_porazka_to_porazka(
-    mini_repo: Path, monkeypatch: pytest.MonkeyPatch, always: bool, second: str, code: int, flaky: list[str] | None
+    mini_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], always: bool, second: str, code: int, flaky: list[str] | None
 ) -> None:
     (mini_repo / "tests" / "test_flaky.py").write_text(FLAKY.format(always=always, second=second), encoding="utf-8")
     monkeypatch.setenv("GITHUB_RUN_ID", "40380584486")
@@ -468,6 +468,9 @@ def test_bramka_ponawia_raz_test_ktory_padl_a_przejscie_po_ponowieniu_to_flaky_t
     found = niestabilne_testy.FLAKY_TESTY
     assert (None if not found.exists() else [(flaky.test, flaky.run, flaky.zadanie) for flaky in niestabilne_testy.flaky_testy_z_json(found.read_text(encoding="utf-8"))[0]]) == (
         None if flaky is None else [(test, 40380584486, job.nazwa) for test in flaky]
+    )
+    assert [line for line in capsys.readouterr().out.splitlines() if line.startswith("FLAKY TESTY")] == (
+        [] if flaky is None else [f"FLAKY TESTY | przeszły po ponowieniu: {', '.join(flaky)}"]
     )
 
 
