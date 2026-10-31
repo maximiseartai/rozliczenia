@@ -7,8 +7,11 @@ modelu w ich kodzie daje ``KROK STOI`` (#52).
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +21,7 @@ from tests.fixtures.potomne import wait_for
 import limit_kroku
 
 STUCK_THREAD = "sprawdzenie przeplotów w teście"
+TOOLS = Path(__file__).resolve().parents[1] / "tools"
 
 
 class _Przerwanie(BaseException):
@@ -188,3 +192,20 @@ def test_koniec_wewnetrznego_bloku_podmian_zostawia_podmiany_zewnetrznego() -> N
 
     assert after_inner == ("tempfile modelu", "prawdziwy os.stat")
     assert (module.tempfile, module.stat) == ("prawdziwy tempfile", "prawdziwy os.stat")
+
+
+def test_skrypt_ktorego_sprawdzenie_stoi_konczy_sie_po_bledzie_krok_stoi() -> None:
+    """Interpreter przy wyjściu nie czeka na wątek, który stanął, więc skrypt skilla z ``KROK STOI`` się kończy."""
+
+    program = (
+        "import sys, threading; sys.path.insert(0, sys.argv[1]); import limit_kroku; "
+        "outcome = limit_kroku.watched(lambda heartbeat: threading.Event().wait(), limit=0.3, name='sprawdzenie'); "
+        "print(outcome.lines()[0])"
+    )
+
+    finished = subprocess.run(
+        [sys.executable, "-c", program, str(TOOLS)], capture_output=True, text=True, check=False, timeout=30
+    )
+
+    assert finished.returncode == 0, finished.stderr
+    assert finished.stdout.startswith("KROK STOI: planista nie doszedł"), finished.stdout
