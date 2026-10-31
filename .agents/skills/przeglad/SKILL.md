@@ -21,10 +21,17 @@ W tym repo Ważne były zwykle:
 - stan, który jedna część przebiegu zakłada po innej (część podstawy skilla startująca od środka porządku);
 - przypisanie albo zakres liczony od złej linii lub złego commitu (np. `git blame` pierwszej linii wielowierszowej instrukcji).
 
-Drobne znalezisko to luka bez defektu: przeżyta mutacja, której nic nie łapie, nieaktualne zdanie w dokumencie, kosztowna, ale poprawna droga.
+Wagę znaleziska daje pierwszy wiersz tabeli, który do niego pasuje:
+
+| Znalezisko | Waga |
+|---|---|
+| Sprawdzenie, które PR dodaje albo zmienia (test struktury, checker, hook, skrypt mutacji, bramka CI, reguła lintu), przepuszcza odtworzony przypadek, który według swojego wiersza reguły, docstringu albo opisu PR powinno wywrócić, albo wywraca się na poprawnym wejściu | Ważne: dziura w sprawdzeniu to defekt jego zachowania |
+| Defekt zachowania, który odtworzyłeś poleceniem z wynikiem | Ważne, także gdy jest rzadki, gdy dziś w repo nie ma takiego wejścia i gdy opis PR albo jego Merge Danger mówi, że zmiana jest bezpieczna |
+| Przeżyta mutacja, choć kod pod nią zachowuje się poprawnie, nieaktualne zdanie w dokumencie bez złego skutku, kosztowna, ale poprawna droga | Drobne: luka bez defektu |
+
 Drobnych podaj najwyżej 3, najważniejsze.
 Defekt, który zmiana PR wywołuje albo ujawnia, liczy się do werdyktu także wtedy, gdy siedzi w pliku, którego PR nie zmienia (np. nowa konfiguracja uruchamia niezmieniony kod w nowym stanie).
-Istniejące wcześniej to tylko defekt, który powtarzasz na merge-base bez tej zmiany, i do werdyktu się nie liczy.
+Odtworzony defekt wypada z werdyktu tylko wtedy, gdy powtarzasz go na merge-base bez tej zmiany (istniejący wcześniej) albo gdy na jego linii stoi wyjątek z powodem, terminem i zgodą Maksa.
 Styl, nazwy i formatowanie zostawiasz ruffowi, mypy i lintom frontendu.
 
 ## Dowody
