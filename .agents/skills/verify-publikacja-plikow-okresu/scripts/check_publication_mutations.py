@@ -60,6 +60,13 @@ MUTATIONS = (
         "przy zajętej nazwie shutil.move kopiuje plik i nadpisuje cel",
         "PUBLIKACJA: LUKA MODELU",
     ),
+    Mutation(
+        "pętla bez wywołania systemu plików w _publish",
+        (Edit(VERIFIED, "    ensure_period_files_absent(files)\n    period_directory = files.folder.directory\n", "    while True:\n        pass\n    ensure_period_files_absent(files)\n    period_directory = files.folder.directory\n"),),
+        EXPLORER,
+        "sprawdzenie ma nazwać Uruchomienie, które nie wraca, a nie wisieć do limitu pytest",
+        "PUBLIKACJA: ZAWIESZENIE",
+    ),
 )
 
 

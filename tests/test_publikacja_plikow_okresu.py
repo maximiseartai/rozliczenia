@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import stat
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -66,6 +67,49 @@ def test_publikacja_plikow_okresu_zachowuje_nienadpisywanie_i_razem_albo_zaden_w
     # Drugie Uruchomienie procesu musi wejść między kroki pierwszego, inaczej zakres dwóch Uruchomień sprawdza tylko
     # jedno po drugim i OK niczego nie mówi o wyścigu.
     assert interleaved, "w żadnym harmonogramie drugie Uruchomienie procesu nie ruszyło przed końcem pierwszego"
+
+
+# Sprawdzenie, czy plików okresu nie ma, kręci się tu w pętli bez wywołania systemu plików, więc żaden krok nie wraca.
+SPINNING_PUBLICATION = """
+import importlib.util, sys
+
+spec = importlib.util.spec_from_file_location("explore_publication", sys.argv[1])
+explorer = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = explorer
+spec.loader.exec_module(explorer)
+explorer.STEP_LIMIT_SECONDS = 2.0
+
+def spinning(files):
+    while True:
+        pass
+
+explorer.preparation_files.ensure_period_files_absent = spinning
+raise SystemExit(explorer.main(["--scope", "jedno-uruchomienie"]))
+"""
+
+
+def test_kod_publikacji_bez_kolejnego_kroku_konczy_sprawdzenie_nazwa_uruchomienia_i_kroku_zamiast_limitu_pytest() -> None:
+    """Sprawdzenie uruchomione jak w CI nie wisi do limitu 120 s pytest, tylko mówi, co stoi i gdzie (#84)."""
+
+    done = subprocess.run(
+        [sys.executable, "-c", SPINNING_PUBLICATION, str(EXPLORER)],
+        env={**os.environ, "PYTHONUTF8": "1"},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+
+    lines = done.stdout.splitlines()
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert lines[-1] == "PUBLIKACJA: ZAWIESZENIE: krok nie wrócił w 2 s, więc nie ma werdyktu o regułach."
+    assert lines[0].startswith(
+        "ZAWIESZENIE: Uruchomienie procesu u1 po kroku „zapis skoroszytu=None” nie doszło do kolejnego kroku w 2 s "
+        "i stoi w [preparation_files.py:"
+    ), lines[0]
+    assert " _publish]: kod kręci się bez wywołania systemu plików" in lines[0]
 
 
 def test_sprawdzenie_publikacji_prowadzi_uruchomienia_bez_watkow_systemu(monkeypatch: pytest.MonkeyPatch) -> None:

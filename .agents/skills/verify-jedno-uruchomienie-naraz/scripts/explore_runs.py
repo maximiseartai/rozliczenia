@@ -37,6 +37,10 @@ that is served to the end. Any other ``threading`` use in the two files stops th
 Schedules that reach a state already explored are cut short: the code is deterministic, so a state
 (each thread's steps so far, every Uruchomienie's flags, the lock and the Events) has the same
 futures every time.
+
+A modelled thread that does not reach its next step within ``STEP_LIMIT_SECONDS`` (real code waiting on something
+outside the model, such as a real lock, a queue or a sleep) ends the check as ZAWIESZENIE, naming the thread, its
+last step and where it stands (``tools/straz_kroku.py``).
 """
 
 from __future__ import annotations
@@ -48,12 +52,15 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
+from types import FrameType, SimpleNamespace
 from typing import Any, Literal
 
 from greenlet import getcurrent, greenlet  # type: ignore[import-untyped]  # greenlet ships no type hints
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools"))
+
+import straz_kroku
 
 from rozliczenia import process_run
 from rozliczenia.centrum import contract, runs, shutdown
@@ -66,6 +73,7 @@ from rozliczenia.progress import ProgressProjection
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 VERIFIED_FILES = ("runs.py", "shutdown.py")
+STEP_LIMIT_SECONDS = 10.0
 CLOSE_LOG = "dziennik Centrum: shutdown_requested"
 REQUESTED_SET = "Shutdown._requested.set()"
 CLOSE_TAB = "karta Zamknij"
@@ -116,6 +124,7 @@ class Actor:
 
 
 _ABORT = "\0abort"
+WATCH: straz_kroku.StepWatch[Actor] = straz_kroku.StepWatch()
 
 
 def _current_actor() -> Actor:
@@ -125,13 +134,12 @@ def _current_actor() -> Actor:
     return actor
 
 
-def _code_location() -> str:
-    frame = sys._getframe(2)
+def _code_location(frame: FrameType | None) -> str:
     while frame is not None:
         name = Path(frame.f_code.co_filename).name
         if name in VERIFIED_FILES and Path(frame.f_code.co_filename).parent.name == "centrum":
             return f"{name}:{frame.f_lineno} {frame.f_code.co_name}"
-        frame = frame.f_back  # type: ignore[assignment]
+        frame = frame.f_back
     return "model"
 
 
@@ -174,7 +182,7 @@ class Scheduler:
         """Parks the calling thread until the checker picks this step; returns the picked variant."""
 
         actor = _current_actor()
-        actor.pending = Pending(call, _code_location(), enabled, variants)
+        actor.pending = Pending(call, _code_location(sys._getframe(1)), enabled, variants)
         actor.status = "parked"
         self.home.switch()
         outcome, actor.go = actor.go, None
@@ -193,7 +201,10 @@ class Scheduler:
 
         while (actor := next((actor for actor in self.actors if actor.status == "running"), None)) is not None:
             assert actor.greenlet is not None
+            WATCH.running = actor
             actor.greenlet.switch()
+            WATCH.running = None
+            WATCH.returns += 1
 
     def release(self, actor: Actor, outcome: str) -> None:
         actor.status = "running"
@@ -1049,6 +1060,16 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
     return Outcome(new, known, gaps, vacuous, lines)
 
 
+def _stalled(actor: Actor | None, frame: FrameType | None) -> str:
+    if actor is None:
+        return f"ZAWIESZENIE: harmonogram sprawdzenia nie doszedł do kolejnego kroku w {STEP_LIMIT_SECONDS:g} s."
+    after = f"po kroku „{actor.history[-1]}”" if actor.history else "przed pierwszym krokiem"
+    return (
+        f"ZAWIESZENIE: wątek modelu „{actor.name}” {after} nie doszedł do kolejnego kroku w {STEP_LIMIT_SECONDS:g} s "
+        f"i stoi w [{_code_location(frame)}]: kod czeka na coś spoza modelu (prawdziwą blokadę, kolejkę albo sen)."
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Exhaustive check of one Uruchomienie at a time and no shutdown during one."
@@ -1061,7 +1082,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--strict", action="store_true", help="report known findings as violations too")
     arguments = parser.parse_args(argv)
-    reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
+    verdict = f"URUCHOMIENIA: ZAWIESZENIE: krok nie wrócił w {STEP_LIMIT_SECONDS:g} s, więc nie ma werdyktu o regułach."
+    with WATCH.guard(STEP_LIMIT_SECONDS, _stalled, verdict):
+        reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
     outcome = summarize(reports, strict=arguments.strict)
     print("\n".join(outcome.lines))
     return outcome.exit_code

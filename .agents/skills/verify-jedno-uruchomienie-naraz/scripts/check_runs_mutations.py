@@ -117,6 +117,13 @@ MUTATIONS = (
         "model nie zna tej blokady, więc nie może nic orzec",
         "URUCHOMIENIA: LUKA MODELU",
     ),
+    Mutation(
+        "prawdziwa blokada spoza modelu w RunHost.start",
+        (Edit(RUNS, "            run = _Run(self, prepared, self._stops)\n", "            __import__(\"queue\").Queue().get()\n            run = _Run(self, prepared, self._stops)\n"),),
+        (EXPLORER, "--scope", "zamknij-w-trakcie"),
+        "sprawdzenie ma nazwać wątek i krok, który nie wraca, a nie wisieć do limitu pytest",
+        "URUCHOMIENIA: ZAWIESZENIE",
+    ),
 )
 
 

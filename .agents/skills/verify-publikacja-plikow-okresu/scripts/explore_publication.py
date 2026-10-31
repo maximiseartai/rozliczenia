@@ -23,6 +23,10 @@ stops the check as LUKA MODELU instead of passing silently.
 Schedules that reach a state already explored are cut short: the code is
 deterministic, so a state (disk contents, what each Uruchomienie procesu has
 observed so far, and the remaining bounds) has the same futures every time.
+
+An Uruchomienie procesu that does not reach its next step within ``STEP_LIMIT_SECONDS`` (a loop without a filesystem
+call, or a wait on something outside the model) ends the check as ZAWIESZENIE, naming the Uruchomienie, its last
+step and where it stands (``tools/straz_kroku.py``).
 """
 
 from __future__ import annotations
@@ -41,12 +45,15 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import TracebackType
+from types import FrameType, TracebackType
 from typing import Any, Literal
 
 from greenlet import getcurrent, greenlet  # type: ignore[import-untyped]  # greenlet ships no type hints
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools"))
+
+import straz_kroku
 
 from rozliczenia import preparation_files
 from rozliczenia.period_folder import PeriodFolder
@@ -59,6 +66,7 @@ DAD = "tata"
 INTERNAL = "Rozliczenie wewnętrzne"
 COLLECTIVE = "Plik zbiorczy"
 VERIFIED_FILE = "preparation_files.py"
+STEP_LIMIT_SECONDS = 10.0
 
 RunResult = Literal["SUKCES", "ZATRZYMANE", "PRZERWANE"]
 
@@ -248,6 +256,9 @@ class Run:
     greenlet: greenlet | None = None
 
 
+WATCH: straz_kroku.StepWatch[Run] = straz_kroku.StepWatch()
+
+
 def _current_run() -> Run | None:
     run: Run | None = getattr(getcurrent(), "checked_run", None)
     return run
@@ -264,12 +275,11 @@ def _escaping() -> BaseException | None:
     return None if isinstance(error, Exception) else error
 
 
-def _code_location() -> str:
-    frame = sys._getframe(2)
+def _code_location(frame: FrameType | None) -> str:
     while frame is not None:
         if frame.f_code.co_filename.endswith(VERIFIED_FILE):
             return f"{VERIFIED_FILE}:{frame.f_lineno} {frame.f_code.co_name}"
-        frame = frame.f_back  # type: ignore[assignment]
+        frame = frame.f_back
     return "poza preparation_files.py"
 
 
@@ -305,7 +315,7 @@ class Scheduler:
             raise run.stopped_by()
         if (escaping := _escaping()) is not None:
             raise escaping
-        pending = Pending(call, tuple(self.disk.label(path) for path in paths), mutating, _code_location(), killable)
+        pending = Pending(call, tuple(self.disk.label(path) for path in paths), mutating, _code_location(sys._getframe(1)), killable)
         run.pending = pending
         run.status = "parked"
         self.home.switch()
@@ -334,7 +344,10 @@ class Scheduler:
         while (run := next((run for run in runs if run.status == "running"), None)) is not None:
             assert run.greenlet is not None
             self.disk.actor = run.name
+            WATCH.running = run
             run.greenlet.switch()
+            WATCH.running = None
+            WATCH.returns += 1
 
     def release(self, run: Run, outcome: str) -> None:
         run.status = "running"
@@ -976,6 +989,16 @@ def summarize(reports: Sequence[ScopeReport], *, strict: bool = False) -> Outcom
     return Outcome(new, known, accepted, gaps, vacuous, lines)
 
 
+def _stalled(run: Run | None, frame: FrameType | None) -> str:
+    if run is None:
+        return f"ZAWIESZENIE: harmonogram sprawdzenia nie doszedł do kolejnego kroku w {STEP_LIMIT_SECONDS:g} s."
+    after = f"po kroku „{run.history[-1]}”" if run.history else "przed pierwszym krokiem"
+    return (
+        f"ZAWIESZENIE: Uruchomienie procesu {run.name} {after} nie doszło do kolejnego kroku w {STEP_LIMIT_SECONDS:g} s "
+        f"i stoi w [{_code_location(frame)}]: kod kręci się bez wywołania systemu plików albo czeka na coś spoza modelu."
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Exhaustive check of how Przygotowanie publishes the period files.")
     parser.add_argument("--scope", choices=sorted(SCOPES), action="append", help="one scope; default: all")
@@ -986,7 +1009,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\n".join(f"LUKA MODELU: {problem}" for problem in problems))
         print(f"PUBLIKACJA: LUKA MODELU ({len(problems)}): kod używa wywołania, którego dysk w pamięci nie modeluje.")
         return 2
-    reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
+    verdict = f"PUBLIKACJA: ZAWIESZENIE: krok nie wrócił w {STEP_LIMIT_SECONDS:g} s, więc nie ma werdyktu o regułach."
+    with WATCH.guard(STEP_LIMIT_SECONDS, _stalled, verdict):
+        reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
     outcome = summarize(reports, strict=arguments.strict)
     print("\n".join(outcome.lines))
     return outcome.exit_code

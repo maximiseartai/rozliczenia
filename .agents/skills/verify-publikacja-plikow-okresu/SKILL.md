@@ -70,13 +70,17 @@ Mac, needs nothing beyond the repo's `.venv`, and runs in CI as
 `tests/test_publikacja_plikow_okresu.py`. In a worktree the script checks the
 worktree's own `src`.
 
-The script has no step limit of its own, so a hang in the code under check (a
-loop that makes no filesystem call) leaves a manual run waiting until you press
-Ctrl+C. Under pytest the `timeout = 120` of `pyproject.toml` ends it: on Linux
-and macOS as `Failed: Timeout` of the test, on Windows by killing the xdist
-worker. The CI `pytest` job has no `timeout-minutes`, so that limit is the only
-one there. The check does not tell a hang from a slow runner and does not name
-the step that hung: look at the stack that pytest-timeout prints.
+A hang in the code under check (a loop that makes no filesystem call, or a wait
+on something outside the model) stops the script's one OS thread. A watchdog on
+its own thread (`tools/straz_kroku.py`) then ends the script after 10 s without a
+step with `PUBLIKACJA: ZAWIESZENIE`. The first line names the Uruchomienie, its last
+step and where it stands, for example `Uruchomienie procesu u1 po kroku „zapis
+skoroszytu=None” … stoi w [preparation_files.py:LINE _publish]`, and the stack below
+it shows the loop or the wait. The watchdog guards only the script run as its own
+process, because it ends the process. `tests/test_publikacja_plikow_okresu.py` runs
+the check inside pytest, so there a hang still waits for the `timeout = 120` of
+`pyproject.toml`: on Linux and macOS as `Failed: Timeout` of the test, on Windows by
+killing the xdist worker, with the stack that pytest-timeout prints.
 
 The last line is the verdict:
 
@@ -86,6 +90,7 @@ The last line is the verdict:
 | `PUBLIKACJA OK, ZNANE USTALENIA: n, ZAAKCEPTOWANE RYZYKA: m` | 0 | Only the known findings and accepted risks below, each printed with its counterexample. A count of zero is left out. |
 | `PUBLIKACJA: NOWE NARUSZENIE (n)` | 1 | A rule breaks in a way not listed below, or `BRAK_PUBLIKACJI`: with no errors, kills, or Dad actions, nothing was ever published. |
 | `PUBLIKACJA: LUKA MODELU (n)` | 2 | The code made a filesystem call the in-memory disk does not model. No verdict on the rules. |
+| `PUBLIKACJA: ZAWIESZENIE: krok nie wrócił w 10 s, …` | 3 | An Uruchomienie procesu did not reach its next step within 10 s (`STEP_LIMIT_SECONDS`). No verdict on the rules. |
 
 `--scope jedno-uruchomienie` or `--scope dwa-uruchomienia` runs one scope.
 `--strict` counts known findings and accepted risks as violations too.
@@ -192,7 +197,8 @@ py -3 .agents\skills\verify-publikacja-plikow-okresu\scripts\check_publication_m
 It must end with `MUTACJE OK`: `os.replace` instead of `os.rename`, a removed
 rollback, a failed rollback reported as plain `BLAD_ZAPISU`, recording a file
 for rollback before it is moved, and a failed staging cleanup reported as
-`BLAD_ZAPISU` all give `NOWE NARUSZENIE`. `shutil.move` gives `LUKA MODELU`. A mutation reported as
+`BLAD_ZAPISU` all give `NOWE NARUSZENIE`. `shutil.move` gives `LUKA MODELU`, and a loop with no filesystem
+call in `_publish` gives `ZAWIESZENIE`. A mutation reported as
 `NIEAKTUALNA` no longer matches `preparation_files.py`. Rewrite its `anchor` and
 `replacement` in `check_publication_mutations.py` against the new code so it breaks the same
 rule again. If the publication code moves to another file, update

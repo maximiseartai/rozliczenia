@@ -107,6 +107,7 @@ script checks the worktree's own `src`.
 | `URUCHOMIENIA OK, ZNANE USTALENIA: n` | 0 | Only the known findings below, each printed with its counterexample. |
 | `URUCHOMIENIA: NOWE NARUSZENIE (n)` | 1 | A rule breaks in a way not listed below, or a scope never reached a behaviour it must reach (`BRAK_ZAMKNIECIA`, `BRAK_ODMOWY_ZAMKNIECIA`, `BRAK_WYNIKU`, `BRAK_ODMOWY_STARTU`), so the check would prove nothing. |
 | `URUCHOMIENIA: LUKA MODELU (n)` | 2 | `runs.py` or `shutdown.py` uses `threading` in a way the model does not cover (for example `RLock`, `Condition`, `wait(timeout=...)`). No verdict on the rules. |
+| `URUCHOMIENIA: ZAWIESZENIE: krok nie wrócił w 10 s, …` | 3 | A modelled thread did not reach its next step within 10 s (`STEP_LIMIT_SECONDS`): the code waits on something the model does not run. No verdict on the rules. |
 
 `--scope zamknij-w-trakcie`, `--scope dwie-karty`, `--scope aktualizacja` or `--scope przywracanie` runs one scope. `--strict`
 counts known findings as violations too: use it to confirm a fix.
@@ -126,6 +127,11 @@ checker lets any thread whose step can go now go first, and it tries every such
 order. A lock entry can go only while the lock is free, and `wait()` only once the
 Event is set. The actions after the result (`AfterRun`) are one step that
 writes nothing. Schedules that reach a state already seen are cut short.
+Code that waits on something outside the model (a real lock, a queue, a sleep)
+stops the one OS thread, so a watchdog on its own thread (`tools/straz_kroku.py`)
+ends the script after 10 s without a step and names what stood. The watchdog
+guards only the script run as its own process (`main`: the `ci:` key and the
+check in `tests/test_jedno_uruchomienie_naraz.py`), because it ends the process.
 
 Replaced: `intermax_copies_router` by a „Przywróć tę kopię” tab that calls the real
 `begin_restore`, takes one step for the Kopia and the replace of INTERMAX (`intermax_copies.restore`,
@@ -186,6 +192,12 @@ requests, `wątek Uruchomienie n` is the thread `RunHost.start` spawned,
   such as a request arriving after uvicorn stopped accepting, or a thread
   passing a lock another thread holds. Fix the model primitives or the actors in
   `explore_runs.py`, then rerun the mutations below.
+- **ZAWIESZENIE**: the first line names the modelled thread, the last step it
+  took and where it stands, for example `wątek modelu „karta Uruchom 1” po kroku
+  „wejście w blokadę RunHost._lock” … stoi w [runs.py:LINE __init__]`, and the
+  stack below it shows what that code waits on. If it waits on a real lock, an
+  Event or a queue, model it as for LUKA MODELU below; if it is a hang the
+  product code would have at Dad's too, it is a real bug.
 - **LUKA MODELU**: model the new `threading` use in `ModelThreading` with its
   real semantics (a step per entry or signal, and a step that can go only when
   it would not block), or ask whether the code should avoid it. Never reword a
@@ -210,7 +222,8 @@ the actions after the result moved below `ended = True`,
 `Shutdown.request` without the refusal, an accepted shutdown that does not set
 `_closing`, `begin_update` without the closing or the running check, `start`
 without the updating check, `begin_restore` without the running check,
-`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`.
+`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`,
+and a real `queue.Queue().get()` in `start` gives `ZAWIESZENIE`.
 CI runs this in the `mutations` job. A mutation reported as `NIEAKTUALNA` no longer matches its file.
 Rewrite its `anchor` and `replacement` in `check_runs_mutations.py` so it breaks
 the same rule again in the new code. Then move the sync commit forward as above.
