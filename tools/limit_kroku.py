@@ -106,16 +106,22 @@ def watched(work: Callable[[Heartbeat], T], *, limit: float, name: str) -> T | S
     thread = threading.Thread(target=body, name=name, daemon=True)
     thread.start()
     beats, since = heartbeat.beats, time.monotonic()
-    while thread.is_alive():
-        thread.join(limit / 10)
-        now = time.monotonic()
-        if heartbeat.beats != beats:
-            beats, since = heartbeat.beats, now
-        elif thread.is_alive() and now - since >= limit:
-            heartbeat.abandoned = True
-            frame = sys._current_frames().get(thread.ident or 0)
-            stack = tuple(traceback.format_stack(frame)) if frame is not None else ()
-            return Stuck(heartbeat.actor, heartbeat.step, limit, stack)
+    try:
+        while thread.is_alive():
+            thread.join(limit / 10)
+            now = time.monotonic()
+            if heartbeat.beats != beats:
+                beats, since = heartbeat.beats, now
+            elif thread.is_alive() and now - since >= limit:
+                heartbeat.abandoned = True
+                frame = sys._current_frames().get(thread.ident or 0)
+                stack = tuple(traceback.format_stack(frame)) if frame is not None else ()
+                return Stuck(heartbeat.actor, heartbeat.step, limit, stack)
+    except BaseException:
+        # pytest's limit and Ctrl+C reach only the main thread, so here; without this the check would go on patching
+        # modules under the next tests of the worker.
+        heartbeat.abandoned = True
+        raise
     if failure:
         raise failure[0]
     return result[0]

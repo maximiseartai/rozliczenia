@@ -44,6 +44,35 @@ def test_wyjatek_sprawdzenia_spoza_exception_dochodzi_do_wolajacego() -> None:
         limit_kroku.watched(work, limit=10.0, name=STUCK_THREAD)
 
 
+def test_limit_pytest_w_watku_czekajacym_porzuca_sprawdzenie_ktore_idzie_dalej(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``Failed: Timeout`` i Ctrl+C przychodzą tylko do głównego wątku, czyli do czekania w ``watched``.
+
+    Bez porzucenia sprawdzenie szło dalej i podmieniało moduły pod następnymi testami tego workera.
+    """
+
+    join = threading.Thread.join
+    waiting = threading.current_thread()
+    steps: list[int] = []
+
+    def join_until_limit(thread: threading.Thread, timeout: float | None = None) -> None:
+        if threading.current_thread() is waiting and steps:
+            raise _Przerwanie
+        join(thread, timeout)
+
+    def work(heartbeat: limit_kroku.Heartbeat) -> None:
+        while True:
+            heartbeat.entering("karta 1", f"krok {len(steps)}")
+            heartbeat.left()
+            steps.append(len(steps))
+
+    monkeypatch.setattr(threading.Thread, "join", join_until_limit)
+
+    with pytest.raises(_Przerwanie):
+        limit_kroku.watched(work, limit=10.0, name=STUCK_THREAD)
+
+    assert wait_for(_bez_watku_sprawdzenia)
+
+
 def test_sprawdzenie_ktore_idzie_wolno_ale_idzie_trwa_dluzej_niz_limit_kroku() -> None:
     """Limit liczy się od ostatniego kroku, nie od startu: zajęty runner nie robi z wolnego sprawdzenia zawieszenia."""
 

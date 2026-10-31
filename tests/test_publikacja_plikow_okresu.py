@@ -135,17 +135,18 @@ def test_blokada_spoza_modelu_w_kodzie_publikacji_konczy_sprawdzenie_krokiem_kto
 
 
 class _LimitCzasu(BaseException):
-    """Jak `Failed: Timeout` pytest-timeout: wyjątek spoza `Exception`, który sygnał rzuca w kodzie publikacji."""
+    """Jak `Failed: Timeout` pytest-timeout: wyjątek spoza `Exception`, rzucony w kodzie publikacji."""
 
 
 @pytest.mark.parametrize("zatrzymanie", range(1, 21))
 def test_limit_czasu_w_kodzie_publikacji_konczy_sprawdzenie_tym_limitem(
     monkeypatch: pytest.MonkeyPatch, zatrzymanie: int
 ) -> None:
-    """Limit pytest, który przychodzi w Uruchomieniu procesu, kończy sprawdzenie, a nie jedno Uruchomienie.
+    """Wyjątek spoza `Exception`, który przychodzi w Uruchomieniu procesu, kończy sprawdzenie, a nie jedno Uruchomienie.
 
-    Na Linuksie i macOS pytest-timeout rzuca `Failed: Timeout` w bieżącej ramce, a ta należy często do kodu
-    publikacji w greenlecie Uruchomienia. Połknięty jako Zatrzymanie albo przerwany jak harmonogram w znanym stanie,
+    Do #52 pytest-timeout na Linuksie i macOS rzucał `Failed: Timeout` w bieżącej ramce, a ta należała często do kodu
+    publikacji w greenlecie Uruchomienia; dziś limit trafia do wątku, który czeka w `limit_kroku.watched`, a taki
+    wyjątek może rzucić już tylko sam kod pod sprawdzeniem. Połknięty jako Zatrzymanie albo przerwany jak harmonogram w znanym stanie,
     zmieniał drzewo harmonogramów: sprawdzenie kończyło się `IndexError`, fałszywym naruszeniem albo przechodziło,
     a pętla bez końca w kodzie publikacji nie kończyła się wcale. Limit przychodzi tu w chwili N-tego Zatrzymania
     w `ensure_period_files_absent`, bo sprzątanie po nim trafia też w stany sprawdzone wcześniej.

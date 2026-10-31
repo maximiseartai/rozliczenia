@@ -262,8 +262,10 @@ def _current_run() -> Run | None:
 def _escaping() -> BaseException | None:
     """The exception that the run is unwinding from, unless it is the code's own stop (an ``Exception``).
 
-    pytest's time limit and Ctrl+C belong to whoever runs the check, so the cleanup they pass through takes no step
-    that the checker could pick, cut or kill: the check would go on exploring a tree that the exception has changed.
+    Such an exception (``KeyboardInterrupt``, ``SystemExit``, pytest's ``Failed``) belongs to whoever runs the check, so
+    the cleanup it passes through takes no step that the checker could pick, cut or kill: the check would go on
+    exploring a tree that the exception has changed. pytest's time limit and Ctrl+C themselves reach the thread that
+    waits in ``limit_kroku.watched``, which abandons the check.
     """
 
     error = sys.exc_info()[1]
@@ -729,7 +731,7 @@ def _run_body(run: Run, layout: Layout) -> None:
     except ModelGap as gap:
         run.gap = str(gap)
         run.result = "PRZERWANE"
-    # pytest's time limit and Ctrl+C are no stop of the code: they leave the greenlet for the checker.
+    # An exception outside ``Exception`` is no stop of the code: it leaves the greenlet for the checker.
     except Exception as error:  # noqa: BLE001 - every stop of the code counts, whatever its type
         run.result = "ZATRZYMANE"
         message = getattr(error, "message", None)
