@@ -41,7 +41,7 @@ from rozliczenia.centrum.tool_update import (
     write_result,
 )
 
-from tests.fixtures.centrum import NO_RELEASE, views_until
+from tests.fixtures.centrum import NO_RELEASE, UPDATE_THREAD, join_threads_since, views_until
 from tests.fixtures.centrum_processes import PreparingCentrum, Surroundings, preparing_centrum, run_to_end, stopped_for_maks
 from tests.fixtures.potomne import wait_for
 from tests.fixtures.preparation import PERIOD, incomplete_period_rows
@@ -84,7 +84,15 @@ def update_until_done(centrum: PreparingCentrum) -> dict[str, Any]:
     started = centrum.client.post("/api/tool-update")
     assert started.status_code == 202, started.json()
     assert started.json() == {"state": "running", "step": "fetching"}
-    return tool_update_until(centrum, lambda view: view["state"] != "running" or view["step"] == "restarting")
+    view = tool_update_until(centrum, lambda view: view["state"] != "running" or view["step"] == "restarting")
+    click_finished(centrum)
+    return view
+
+
+def click_finished(centrum: PreparingCentrum) -> None:
+    """Czeka na koniec kliknięcia w tle: karta widzi „restarting”, zanim Centrum poprosi opiekuna o start i się zamknie."""
+
+    join_threads_since(centrum.client.since, named=UPDATE_THREAD)
 
 
 def update_until_result(centrum: PreparingCentrum) -> dict[str, Any]:
@@ -766,6 +774,7 @@ def test_nowe_biblioteki_karta_widzi_krok_instalowania_a_dziennik_zapisuje_insta
     installing = tool_update_until(centrum, lambda view: view.get("step") == "installing")
     hold.set()
     view = tool_update_until(centrum, lambda view: view.get("step") == "restarting")
+    click_finished(centrum)
 
     assert installing == {"state": "running", "step": "installing"}
     assert view == {"state": "running", "step": "restarting"}

@@ -61,6 +61,8 @@ RUN_LOGS_IN_BACKGROUND: frozenset[Label] = frozenset({"logi-uruchomienia"})
 STOP_S = 30.0
 # Wątek przejścia kolejki Skrzynki (``Outbox.send_in_background``).
 QUEUE_THREAD = "skrzynka-kolejka"
+# Wątek kliknięcia „Zaktualizuj narzędzie” (``ToolUpdates.start``).
+UPDATE_THREAD = "aktualizacja-narzedzia"
 
 
 @dataclass
