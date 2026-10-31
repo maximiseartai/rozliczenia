@@ -544,8 +544,12 @@ def watki_centrum_koncza_sie_z_testem() -> Iterator[None]:
 
 @pytest.fixture(scope="session")
 def world_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Świat taty dla całej sesji; jego Centrum kończy wątki, zanim przypadki zaczną kopiować świat."""
+
     root = tmp_path_factory.mktemp("swiat-taty")
+    since = new_line()
     _build(root)
+    join_threads_since(since)
     return root
 
 
