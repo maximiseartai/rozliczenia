@@ -17,6 +17,9 @@ from types import ModuleType
 
 import pytest
 
+from rozliczenia.centrum import contract, runs
+from tests.fixtures.potomne import wait_for
+
 EXPLORER = (
     Path(__file__).resolve().parents[1]
     / ".agents"
@@ -48,19 +51,21 @@ def test_sprawdzenie_przeplotow_prowadzi_watki_modelu_bez_watkow_systemu(monkeyp
     """Czas sprawdzenia nie zależy od tego, jak zajęte są procesory runnera (#565).
 
     Wątek systemu na każdy wątek modelu oddawał sterowanie przez jądro przy każdym kroku, a na runnerze CI zajętym
-    innymi workerami xdist sprawdzenie dochodziło do limitu 120 s pytest.
+    innymi workerami xdist sprawdzenie dochodziło do limitu 120 s pytest. Całe sprawdzenie biegnie w jednym wątku
+    systemu, na który test czeka z limitem kroku.
     """
 
     explorer = _load_explorer()
     started: list[str] = []
     start = threading.Thread.start
-    checking = threading.current_thread()
+    checking = {threading.current_thread()}
 
     def counted(thread: threading.Thread) -> None:
         # Wątki tła zostawione przez wcześniejsze testy w tym workerze startują swoje wątki same; liczy się tylko to,
-        # co uruchomiło sprawdzenie.
-        if threading.current_thread() is checking:
+        # co uruchomiło sprawdzenie, także z wątku, który samo uruchomiło.
+        if threading.current_thread() in checking:
             started.append(thread.name)
+            checking.add(thread)
         start(thread)
 
     monkeypatch.setattr(threading.Thread, "start", counted)
@@ -68,4 +73,37 @@ def test_sprawdzenie_przeplotow_prowadzi_watki_modelu_bez_watkow_systemu(monkeyp
     report = explorer.explore(explorer.SCOPES["zamknij-w-trakcie"])
 
     assert report.runs_ended and report.clean_closes
-    assert started == []
+    assert started == ["sprawdzenie przeplotów zamknij-w-trakcie"]
+
+
+def test_blokada_spoza_modelu_konczy_sprawdzenie_bledem_z_watkiem_i_krokiem_zamiast_limitu_pytest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kod pod sprawdzeniem zatrzymany na prawdziwej blokadzie nie wygląda w CI jak flaky test (#91).
+
+    Bez limitu kroku sprawdzenie wisiało do limitu 120 s pytest, tak jak przy flaky teście z #565. Gdy blokada
+    kiedyś puści, porzucone sprawdzenie staje na następnym kroku zamiast badać dalsze harmonogramy w tle.
+    """
+
+    explorer = _load_explorer()
+    released = threading.Event()
+    publish = runs.RunHost._publish_locked
+    calls: list[contract.RunView] = []
+
+    def blocked(host: runs.RunHost, view: contract.RunView) -> None:
+        calls.append(view)
+        released.wait()
+        publish(host, view)
+
+    monkeypatch.setattr(runs.RunHost, "_publish_locked", blocked)
+    try:
+        with pytest.raises(explorer.Hang) as hang:
+            explorer.explore(explorer.SCOPES["zamknij-w-trakcie"], step_limit=2)
+    finally:
+        released.set()
+
+    assert wait_for(lambda: not any(thread.name.startswith("sprawdzenie przeplotów") for thread in threading.enumerate()))
+    assert len(calls) == 1
+    message = str(hang.value)
+    assert "Wątek modelu „karta Uruchom 1” nie doszedł do kolejnego kroku po kroku „wejście w blokadę RunHost._lock”" in message
+    assert "[runs.py:" in message and " start]" in message

@@ -111,6 +111,20 @@ MUTATIONS = (
         "URUCHOMIENIA: NOWE NARUSZENIE",
     ),
     Mutation(
+        "prawdziwa blokada spoza modelu w RunHost.start",
+        (
+            Edit(
+                RUNS,
+                "            run = _Run(self, prepared, self._stops)\n",
+                "            stuck = __import__(\"_thread\").allocate_lock()\n            stuck.acquire()\n            stuck.acquire()\n"
+                "            run = _Run(self, prepared, self._stops)\n",
+            ),
+        ),
+        (EXPLORER, "--scope", "zamknij-w-trakcie"),
+        "zawieszone sprawdzenie wygląda w CI jak flaky test zamiast wskazać wątek i krok",
+        "URUCHOMIENIA: ZAWIESZENIE",
+    ),
+    Mutation(
         "RLock zamiast Lock w RunHost",
         (Edit(RUNS, "        self._lock = threading.Lock()\n", "        self._lock = threading.RLock()\n"),),
         (EXPLORER, "--scope", "zamknij-w-trakcie"),

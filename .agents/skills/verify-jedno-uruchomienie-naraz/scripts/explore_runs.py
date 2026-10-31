@@ -37,18 +37,25 @@ that is served to the end. Any other ``threading`` use in the two files stops th
 Schedules that reach a state already explored are cut short: the code is deterministic, so a state
 (each thread's steps so far, every Uruchomienie's flags, the lock and the Events) has the same
 futures every time.
+
+The schedules run on one checker thread, and the caller waits for it with a step limit: when code under check
+blocks outside the model (a real lock, a sleep, a wait for I/O), no modelled thread reaches its next step, and
+after ``STEP_LIMIT_SECONDS`` the check raises ``Hang``, naming the thread, its last step and the line
+it hangs on, instead of hanging until pytest's limit.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
+import traceback
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
+from types import FrameType, SimpleNamespace
 from typing import Any, Literal
 
 from greenlet import getcurrent, greenlet  # type: ignore[import-untyped]  # greenlet ships no type hints
@@ -66,6 +73,8 @@ from rozliczenia.progress import ProgressProjection
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 VERIFIED_FILES = ("runs.py", "shutdown.py")
+# A step takes microseconds; ten seconds without one is a hang even on a CI runner busy with other xdist workers.
+STEP_LIMIT_SECONDS = 10.0
 CLOSE_LOG = "dziennik Centrum: shutdown_requested"
 REQUESTED_SET = "Shutdown._requested.set()"
 CLOSE_TAB = "karta Zamknij"
@@ -86,6 +95,10 @@ class Abort(BaseException):
 
 class ModelGap(BaseException):
     """The real code used ``threading`` in a way the model primitives do not cover."""
+
+
+class Hang(Exception):
+    """No modelled thread reached its next step within the step limit: the code blocks outside the model."""
 
 
 # --- Scheduler: one modelled thread runs at a time, from one step to the next ------------------------
@@ -125,22 +138,33 @@ def _current_actor() -> Actor:
     return actor
 
 
-def _code_location() -> str:
-    frame = sys._getframe(2)
+def _code_location(frame: FrameType | None) -> str:
+    """The innermost line of ``runs.py`` or ``shutdown.py`` at or above ``frame``; ``model`` for a harness step."""
+
     while frame is not None:
         name = Path(frame.f_code.co_filename).name
         if name in VERIFIED_FILES and Path(frame.f_code.co_filename).parent.name == "centrum":
             return f"{name}:{frame.f_lineno} {frame.f_code.co_name}"
-        frame = frame.f_back  # type: ignore[assignment]
+        frame = frame.f_back
     return "model"
 
 
+@dataclass
+class Watch:
+    """What the checker thread runs now, for the caller that waits on it with the step limit."""
+
+    steps: int = 0
+    running: Actor | None = None
+    abandoned: bool = False
+
+
 class Scheduler:
-    def __init__(self, trace: list[str]) -> None:
+    def __init__(self, trace: list[str], watch: Watch) -> None:
         self.home = getcurrent()  # the checker, which picks every step
         self.actors: list[Actor] = []
         self.trace = trace
         self.gaps: list[str] = []
+        self.watch = watch
 
     def spawn(self, name: str, body: Callable[[], None], run: Any = None) -> Actor:
         """Adds a thread that runs up to its first step at the next ``settle``."""
@@ -174,7 +198,7 @@ class Scheduler:
         """Parks the calling thread until the checker picks this step; returns the picked variant."""
 
         actor = _current_actor()
-        actor.pending = Pending(call, _code_location(), enabled, variants)
+        actor.pending = Pending(call, _code_location(sys._getframe(1)), enabled, variants)
         actor.status = "parked"
         self.home.switch()
         outcome, actor.go = actor.go, None
@@ -193,7 +217,10 @@ class Scheduler:
 
         while (actor := next((actor for actor in self.actors if actor.status == "running"), None)) is not None:
             assert actor.greenlet is not None
+            self.watch.running = actor
             actor.greenlet.switch()
+            self.watch.running = None
+            self.watch.steps += 1
 
     def release(self, actor: Actor, outcome: str) -> None:
         actor.status = "running"
@@ -788,7 +815,7 @@ def _state(world: World) -> object:
     )
 
 
-def execute(scope: Scope, prefix: Sequence[int], visited: set[object]) -> Execution:
+def execute(scope: Scope, prefix: Sequence[int], visited: set[object], watch: Watch) -> Execution:
     picks: list[int] = []
     widths: list[int] = []
     trace: list[str] = []
@@ -799,7 +826,7 @@ def execute(scope: Scope, prefix: Sequence[int], visited: set[object]) -> Execut
         widths.append(count)
         return index
 
-    scheduler = Scheduler(trace)
+    scheduler = Scheduler(trace, watch)
     try:
         with harness(scheduler) as world:
             cut = _drive(world, scope, choose, picks, len(prefix), visited)
@@ -859,7 +886,7 @@ def _drive(
     scheduler.spawn("tata", _decision_tab(world, scope.decisions))
     scheduler.spawn("serwer", _server(world))
     try:
-        while not scheduler.gaps:
+        while not scheduler.gaps and not scheduler.watch.abandoned:
             scheduler.settle()
             running = world.in_progress()
             updating = world.updating()
@@ -950,13 +977,59 @@ class ScopeReport:
         return missing
 
 
-def explore(scope: Scope) -> ScopeReport:
+def explore(scope: Scope, *, step_limit: float = STEP_LIMIT_SECONDS) -> ScopeReport:
+    """Every schedule of ``scope`` on one checker thread; ``Hang`` when no step comes within ``step_limit``.
+
+    After ``Hang`` the checker thread stays blocked where the code under check blocks, with ``runs.py`` and
+    ``shutdown.py`` still patched; if it ever returns, it stops at its next step.
+    """
+
+    watch = Watch()
+    reports: list[ScopeReport] = []
+    failures: list[BaseException] = []
+
+    def check() -> None:
+        try:
+            reports.append(_explore(scope, watch))
+        except BaseException as failure:  # noqa: BLE001 - the caller raises it again on its own thread
+            failures.append(failure)
+
+    checker = threading.Thread(target=check, name=f"sprawdzenie przeplotów {scope.name}", daemon=True)
+    checker.start()
+    steps, since = watch.steps, time.monotonic()
+    while checker.is_alive():
+        checker.join(step_limit / 10)
+        if watch.steps != steps:
+            steps, since = watch.steps, time.monotonic()
+        elif checker.is_alive() and time.monotonic() - since >= step_limit:
+            watch.abandoned = True
+            raise Hang(_hang(checker, watch.running, step_limit))
+    if failures:
+        raise failures[0]
+    return reports[0]
+
+
+def _hang(checker: threading.Thread, actor: Actor | None, step_limit: float) -> str:
+    frame = sys._current_frames().get(checker.ident or 0)
+    if actor is None:
+        who = "Sprawdzenie poza wątkami modelu nie doszło do kolejnego kroku"
+    else:
+        after = f"po kroku „{actor.history[-1]}”" if actor.history else "od swojego startu"
+        who = f"Wątek modelu „{actor.name}” nie doszedł do kolejnego kroku {after}"
+    stack = "".join(traceback.format_stack(frame)) if frame is not None else ""
+    return (
+        f"{who} w {step_limit:g} s: kod pod sprawdzeniem czeka poza modelem w [{_code_location(frame)}].\n"
+        f"Stos wątku sprawdzenia:\n{stack}"
+    ).rstrip()
+
+
+def _explore(scope: Scope, watch: Watch) -> ScopeReport:
     report = ScopeReport(scope)
     visited: set[object] = set()
     started = time.perf_counter()
     prefix: list[int] | None = []
-    while prefix is not None:
-        execution = execute(scope, prefix, visited)
+    while prefix is not None and not watch.abandoned:
+        execution = execute(scope, prefix, visited, watch)
         report.schedules += 1
         report.clean_closes += execution.clean_close
         report.closes_refused += execution.close_refused
@@ -1061,7 +1134,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--strict", action="store_true", help="report known findings as violations too")
     arguments = parser.parse_args(argv)
-    reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
+    try:
+        reports = [explore(SCOPES[name]) for name in (arguments.scope or SCOPES)]
+    except Hang as hang:
+        print(f"{hang}\n\nURUCHOMIENIA: ZAWIESZENIE: kod pod sprawdzeniem czeka poza modelem, więc nie ma werdyktu.")
+        return 3
     outcome = summarize(reports, strict=arguments.strict)
     print("\n".join(outcome.lines))
     return outcome.exit_code

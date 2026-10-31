@@ -107,6 +107,7 @@ script checks the worktree's own `src`.
 | `URUCHOMIENIA OK, ZNANE USTALENIA: n` | 0 | Only the known findings below, each printed with its counterexample. |
 | `URUCHOMIENIA: NOWE NARUSZENIE (n)` | 1 | A rule breaks in a way not listed below, or a scope never reached a behaviour it must reach (`BRAK_ZAMKNIECIA`, `BRAK_ODMOWY_ZAMKNIECIA`, `BRAK_WYNIKU`, `BRAK_ODMOWY_STARTU`), so the check would prove nothing. |
 | `URUCHOMIENIA: LUKA MODELU (n)` | 2 | `runs.py` or `shutdown.py` uses `threading` in a way the model does not cover (for example `RLock`, `Condition`, `wait(timeout=...)`). No verdict on the rules. |
+| `URUCHOMIENIA: ZAWIESZENIE: …` | 3 | No modelled thread reached its next step within 10 s (`STEP_LIMIT_SECONDS`): code under check blocks outside the model, on a real lock, a sleep or a wait for I/O. No verdict on the rules. |
 
 `--scope zamknij-w-trakcie`, `--scope dwie-karty`, `--scope aktualizacja` or `--scope przywracanie` runs one scope. `--strict`
 counts known findings as violations too: use it to confirm a fix.
@@ -116,8 +117,10 @@ counts known findings as violations too: use it to confirm a fix.
 The script runs the real `RunHost` and `Shutdown`, wired as in `create_app`, in
 modelled threads. FastAPI runs the sync handlers `startRun`, `decideRun` and `closeCentrum`
 in a thread pool, so tabs really do run in parallel. Each modelled thread is a
-greenlet on the script's one OS thread, so a busy CI runner slows the check only by
-its share of a CPU, not by a kernel thread switch at every step (#565). Inside `runs.py` and
+greenlet on the script's one checker thread, so a busy CI runner slows the check only by
+its share of a CPU, not by a kernel thread switch at every step (#565). The caller waits
+for the checker thread with a step limit of 10 s, so a hang outside the model ends
+the check as `ZAWIESZENIE` (#91). Inside `runs.py` and
 `shutdown.py`, `threading` is replaced by model primitives: entering
 `RunHost._lock`, each `Event.set`/`clear`/`wait` and starting the Uruchomienie
 thread is one indivisible step, as is each Centrum log entry and
@@ -186,6 +189,13 @@ requests, `wątek Uruchomienie n` is the thread `RunHost.start` spawned,
   such as a request arriving after uvicorn stopped accepting, or a thread
   passing a lock another thread holds. Fix the model primitives or the actors in
   `explore_runs.py`, then rerun the mutations below.
+- **ZAWIESZENIE**: the lines above the last one name the modelled thread, the
+  last step it took and the line it hangs on (`[runs.py:LINE function]`), then
+  the stack of the checker thread. In `test_jedno_uruchomienie_naraz` the same
+  text is the `Hang` error, not pytest's 120 s limit, so it is not a flaky test.
+  Find what that line waits for outside `threading` in `runs.py` and
+  `shutdown.py`: a real lock or Event from another module, a sleep, a queue.
+  Make it a model step or ask whether the code should wait there at all.
 - **LUKA MODELU**: model the new `threading` use in `ModelThreading` with its
   real semantics (a step per entry or signal, and a step that can go only when
   it would not block), or ask whether the code should avoid it. Never reword a
@@ -210,7 +220,8 @@ the actions after the result moved below `ended = True`,
 `Shutdown.request` without the refusal, an accepted shutdown that does not set
 `_closing`, `begin_update` without the closing or the running check, `start`
 without the updating check, `begin_restore` without the running check,
-`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`.
+`start` without the restoring check, and `_busy_locked` blind to a restore. `RLock` in `RunHost` gives `LUKA MODELU`,
+and a real lock taken twice in `RunHost.start` gives `ZAWIESZENIE` after the 10 s step limit.
 CI runs this in the `mutations` job. A mutation reported as `NIEAKTUALNA` no longer matches its file.
 Rewrite its `anchor` and `replacement` in `check_runs_mutations.py` so it breaks
 the same rule again in the new code. Then move the sync commit forward as above.
