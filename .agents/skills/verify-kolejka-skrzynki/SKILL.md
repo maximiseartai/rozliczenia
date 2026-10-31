@@ -495,8 +495,13 @@ Checked only with the bounds in the configurations. Assumed and not checked:
   (`closed="new_issue"` or `"reuse"`), `prepare`, `on_delivered`,
   `on_rejected`, the addresses file, more than 1 000 issues of a label, and
   Python exceptions (BEZ_WYJATKU stays with the checker).
-- No promise looks at `.tmp` files, so the model does not check that
-  `resume` removes them.
+- No promise looks at `.tmp` files, so the model does not check that the
+  pass after `resume` removes them, nor that it waits for the pass lock first
+  (`zostawione`): a mutation that removes them in `Start` again still ends
+  with `MODEL KOLEJKI OK` in `dwa-procesy`. Only
+  `tests/test_kolejka_skrzynki_zgloszen.py`
+  (`test_plik_tymczasowy_z_chwili_startu_znika_dopiero_po_przejsciu_innej_kolejki_tego_folderu`)
+  catches that.
 - Guards without a counterpart in the code, which only bound the run: one
   port closing per run (`zamkniecia < 1`), a second queue of one process only
   while the first runs (no code in `src/` makes two; a restart in one process
