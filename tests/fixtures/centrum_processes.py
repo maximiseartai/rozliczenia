@@ -259,6 +259,26 @@ class PreparingCentrum:
         text = self.metrics_path.read_text(encoding="utf-8")
         return [json.loads(line) for line in text.splitlines()]
 
+    def closings_for_update(self) -> int:
+        """Ile razy Centrum zamknęło się samo po udanej Aktualizacji narzędzia; bez dziennika ani razu."""
+
+        if not self.log_path.exists():
+            return 0
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        return sum(line.split(" ", 2)[1:] == ["zamkniecie", "z=aktualizacja"] for line in lines)
+
+    def wait_closed_for_update(self, closings: int) -> None:
+        """Czeka, aż Centrum, które zamknęło się po aktualizacji ``closings`` razy, zamknie się po niej jeszcze raz.
+
+        Karta widzi krok „restarting”, zanim Centrum uruchomi opiekuna ponownego startu i się zamknie, a prawdziwy
+        opiekun startuje nową wersję dopiero po zamknięciu starej (zwolniony port). Test, który po tym kroku gra
+        opiekuna albo startuje Centrum, czeka więc jeszcze na to zamknięcie (#81).
+        """
+
+        assert wait_for(lambda: self.closings_for_update() > closings), (
+            f"Centrum nie zamknęło się po aktualizacji: {self.client.get('/api/tool-update').json()}"
+        )
+
     def restart(self) -> None:
         """Nowe Centrum na tych samych plikach i Ustawieniach taty, gdy skończy się przejście kolejki poprzedniego.
 

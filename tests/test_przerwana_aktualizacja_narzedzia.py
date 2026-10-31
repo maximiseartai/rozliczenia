@@ -122,11 +122,14 @@ def _version_without_its_library(repository: ToolRepository) -> str:
 
 
 def _update_until(centrum: PreparingCentrum, reached: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
+    closings = centrum.closings_for_update()
     assert centrum.client.post("/api/tool-update").status_code == 202
     deadline = time.monotonic() + 30
     while True:
         view = dict(centrum.client.get("/api/tool-update").json())
         if reached(view):
+            if view.get("step") == "restarting":
+                centrum.wait_closed_for_update(closings)
             return view
         assert time.monotonic() < deadline, f"Aktualizacja narzędzia utknęła w {view}."
         time.sleep(0.02)

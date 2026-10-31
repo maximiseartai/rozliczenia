@@ -79,12 +79,16 @@ UPDATE_WAIT_S = 30
 
 
 def update_until_done(centrum: PreparingCentrum) -> dict[str, Any]:
-    """Klika „Zaktualizuj narzędzie” i czeka na wynik albo na ponowny start Centrum."""
+    """Klika „Zaktualizuj narzędzie” i czeka na wynik albo na zamknięcie Centrum przed ponownym startem."""
 
+    closings = centrum.closings_for_update()
     started = centrum.client.post("/api/tool-update")
     assert started.status_code == 202, started.json()
     assert started.json() == {"state": "running", "step": "fetching"}
-    return tool_update_until(centrum, lambda view: view["state"] != "running" or view["step"] == "restarting")
+    view = tool_update_until(centrum, lambda view: view["state"] != "running" or view["step"] == "restarting")
+    if view["state"] == "running":
+        centrum.wait_closed_for_update(closings)
+    return view
 
 
 def update_until_result(centrum: PreparingCentrum) -> dict[str, Any]:
@@ -766,6 +770,7 @@ def test_nowe_biblioteki_karta_widzi_krok_instalowania_a_dziennik_zapisuje_insta
     installing = tool_update_until(centrum, lambda view: view.get("step") == "installing")
     hold.set()
     view = tool_update_until(centrum, lambda view: view.get("step") == "restarting")
+    centrum.wait_closed_for_update(0)
 
     assert installing == {"state": "running", "step": "installing"}
     assert view == {"state": "running", "step": "restarting"}
