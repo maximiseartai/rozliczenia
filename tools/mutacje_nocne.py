@@ -28,6 +28,9 @@ Workflow ``mutacje-nocne.yml`` biegnie raz na dobę na ``main`` i ręcznie (``wo
   skrypt, który padł, linią ``SKRYPT <skrypt>`` do issue ``Przeżyte mutacje skilli z #N`` PR-u, który ostatni zmienił
   folder skilla od bazy (bez takiej zmiany: inną ścieżkę z ``mutacje_skilli.watched``, a dla podstawy z ``pilnuje``,
   a bez niej ostatni PR nocy); linii, którą issue już ma, nie dostaje drugi raz. Zadanie bez zapisu tego planu albo bez wyniku jednostki czerwieni run.
+  Skrypt, który padł, gdy ``main`` nie ma commitu od bazy (podstawę skilla bez ``pilnuje`` noc uruchamia przy każdej
+  zmianie, także pustej), i przeżyta mutacja, której linii nie wniósł commit nocy, nie mają PR-u, więc zgłoszenie
+  kończy się ``MUTACJE NOCNE FAIL`` z przyczyną.
 
 Bazę i liczbę części nocy drukuje lokalnie bez testów:
 
@@ -195,7 +198,10 @@ def _wniesienie(root: Path, linia_main: Sequence[str], commit: str) -> int:
     """Pozycja na ``linia_main`` commitu, który wniósł ``commit`` na linię pierwszych rodziców HEAD."""
 
     potomkowie = {commit, *_git(root, "rev-list", "--ancestry-path", f"{commit}..HEAD").split()}
-    return next(numer for numer, kandydat in enumerate(linia_main) if kandydat in potomkowie)
+    for numer, kandydat in enumerate(linia_main):
+        if kandydat in potomkowie:
+            return numer
+    raise ValueError(f"commit {commit} nie wszedł na main od bazy nocy, więc nie ma PR-u, któremu go przypisać")
 
 
 def _commity_linii(root: Path, plik: str, linie: Sequence[int]) -> set[str]:
@@ -272,6 +278,8 @@ def przypisz_skrypty(github: GitHub, root: Path, od: str, padly: Sequence[str]) 
         for grupa in ((sciezki[0],), (*sciezki[1:], *mutacje_skilli.INFRASTRUCTURE), ()):
             if commit := _git(root, "log", "-1", "--format=%H", f"{od}..HEAD", "--", *grupa):
                 break
+        if not commit:
+            raise ValueError(f"padł {krok.command[0]}, a main nie ma od bazy {od} commitu, któremu go przypisać")
         wynik.setdefault(autor(github, root, linia_main[_wniesienie(root, linia_main, commit)], commit), []).append(krok.command[0])
     return wynik
 
