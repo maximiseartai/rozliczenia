@@ -21,6 +21,8 @@ W tym repo Ważne były zwykle:
 - stan, który jedna część przebiegu zakłada po innej (część podstawy skilla startująca od środka porządku);
 - przypisanie albo zakres liczony od złej linii lub złego commitu (np. `git blame` pierwszej linii wielowierszowej instrukcji).
 
+Pierwsze Ważne otwiera listę znalezisk: przeglądasz dalej cały diff w każdej klasie z listy wyżej i w każdej innej, której dotyka diff, a werdykt podaje wszystkie Ważne naraz, żeby autor poprawił je w jednej rundzie.
+
 Drobne znalezisko to luka bez defektu: przeżyta mutacja, której nic nie łapie, nieaktualne zdanie w dokumencie, kosztowna, ale poprawna droga.
 Drobnych podaj najwyżej 3, najważniejsze.
 Defekt, który zmiana PR wywołuje albo ujawnia, liczy się do werdyktu także wtedy, gdy siedzi w pliku, którego PR nie zmienia (np. nowa konfiguracja uruchamia niezmieniony kod w nowym stanie).
@@ -44,6 +46,7 @@ Dalej znaleziska od najważniejszego, każde z oznaczeniem, plik:linia i dowodem
 ## Kolejne rundy
 
 Runda po `FAIL` sprawdza diff od przejrzanego SHA do nowego HEAD i to, czy każde znalezisko poprzedniej rundy jest zamknięte.
+Sprawdza też skutki poprawki poza jej diffem: kod, który poprawka wywołuje, i kod, który od niej zależy, także gdy biegnie w innym procesie niż w repro poprzedniej rundy (test, który woła poprawiony kod w procesie pytest, a nie w podprocesie, inne pliki tego samego zadania CI w jednym workerze) albo dzieli z nią stan (wątek, blokada, plik, zmienna środowiska zostawione następnemu testowi).
 Zamkniętych znalezisk nie powtarza.
 Nowe znalezisko w kodzie, którego ta runda nie zmieniła, jest Ważne tylko wtedy, gdy to defekt zachowania z dowodem.
 Po trzeciej rundzie z `FAIL` koordynator nie zleca czwartej, tylko zmienia podejście albo dzieli PR.
@@ -76,7 +79,7 @@ Kto zleca przegląd, podaje numer PR i katalog biegu, w którym leży plik werdy
    Krok kończy się, gdy masz SHA HEAD i merge-base; poprzedni werdykt znaczy, że to kolejna runda (sekcja „Kolejne rundy”).
 2. Przejrzyj diff według sekcji „Co jest porażką” i „Dowody”, a skille z linii `SKILLE VERIFY` wykonaj według sekcji `What CI runs and what stays local` każdego z nich.
    Każde potwierdzone znalezisko z oznaczeniem, plik:linia i dowodem od razu dopisz do pliku `runda-<k>.md` w katalogu werdyktu, żeby przerwany przegląd zostawił znaleziska.
-   Krok kończy się, gdy przejrzałeś cały diff, a każde znalezisko jest w pliku.
+   Krok kończy się, gdy przejrzałeś cały diff w każdej klasie, także po pierwszym Ważnym, w kolejnej rundzie także skutki poprawki poza jej diffem, a każde znalezisko jest w pliku.
 3. Dopisz na górę pliku dwie linie z sekcji „Postać werdyktu”, a na koniec krótko, co sprawdzone i z jakim wynikiem.
    Krok kończy się, gdy liczby w drugiej linii zgadzają się ze znaleziskami w pliku.
 4. Opublikuj werdykt: `.venv/bin/python tools/scal_pr.py <PR> --werdykt <plik>`.
