@@ -136,7 +136,13 @@ Covered files: `src/rozliczenia/centrum/tool_update.py`,
 `src/rozliczenia/centrum/restart_guardian.py`,
 `src/rozliczenia/centrum/launcher.py`.
 
-Sync commit: `33e4b1de` (2026-10-29). Since `9f7c2de9` the covered files
+Sync commit: `274d2e9c` (2026-10-31, #53). Since `33e4b1de` the covered files
+changed only in `launcher._start`, which passes `clock=SYSTEM_CLOCK` to
+`create_app` because `create_app` no longer has a default clock; the clock is
+the one Centrum had before, and its import from `clock.py` (standard library
+only) adds no way to fail. No action of the model changed.
+
+`33e4b1de` (2026-10-29). Since `9f7c2de9` the covered files
 changed only in `ToolUpdates._failed`, which takes the card's next step from
 `update_messages.UpdateFailure` instead of comparing the Komunikat's code. The
 model does not describe the view, so no action of the model changed.
