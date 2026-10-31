@@ -21,6 +21,7 @@ from rozliczenia.template_file import TemplateFile
 from rozliczenia.workbook_files import Problem, WorkbookError
 from tests.fixtures.preparation import write_collective_template, write_internal_template
 from tests.fixtures.centrum import CENTRUM, TOOL_COMMIT, FakeGitHub, FakePlatform
+from tests.fixtures.clock import ManualClock
 from tests.fixtures.workbooks import cut_sheet_after_data_rows
 from tests.fixtures.settlement import write_mapping, write_template
 
@@ -60,6 +61,7 @@ def configured(tmp_path: Path, github: FakeGitHub | None = None, readers: Reader
         platform=FakePlatform(),
         log=log,
         shutdown=Shutdown(log),
+        clock=ManualClock(),
         configuration_files=files,
         tool_freshness=(github or FakeGitHub()).freshness(),
         readers=readers,
