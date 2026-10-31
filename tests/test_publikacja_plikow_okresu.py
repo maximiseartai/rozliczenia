@@ -10,6 +10,7 @@ Zakres, znane ustalenia i postępowanie przy porażce opisuje
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
 import os
 import stat
@@ -119,11 +120,22 @@ def test_blokada_spoza_modelu_w_kodzie_publikacji_konczy_sprawdzenie_krokiem_kto
 
     monkeypatch.setattr(explorer.preparation_files, "ensure_period_files_absent", ensure_absent_after_real_event)
     scope = explorer.SCOPES["jedno-uruchomienie"]
+    replaced = [
+        (explorer.preparation_files, "_write_period_file"),
+        (explorer.preparation_files, "tempfile"),
+        (os, "stat"),
+        (os, "replace"),
+        (builtins, "open"),
+        (explorer, "_GUARDED_DISK"),
+    ]
+    real = [getattr(module, name) for module, name in replaced]
     try:
         report = explorer.explore(scope, step_limit=1.0)
+        # Wątek sprawdzenia wciąż stoi na blokadzie, a następne testy workera już widzą prawdziwe moduły i dysk.
+        assert [getattr(module, name) for module, name in replaced] == real
     finally:
         released.set()
-    # Odblokowane sprawdzenie zwija się przy następnym kroku i oddaje podmienione moduły.
+    # Odblokowane sprawdzenie zwija się przy następnym kroku.
     assert wait_for(lambda: all(thread.name != f"sprawdzenie {scope.name}" for thread in threading.enumerate()))
 
     outcome = explorer.summarize([report])

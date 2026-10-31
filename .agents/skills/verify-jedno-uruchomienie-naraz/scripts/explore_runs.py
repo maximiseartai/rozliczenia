@@ -528,17 +528,13 @@ def harness(scheduler: Scheduler) -> Iterator[World]:
             if stop is not None:
                 raise ModelGap("Zatrzymanie w Stops.ended; model kończy każde Uruchomienie sukcesem")
 
-    # Each verified file sees its own stand-ins; the originals come back after the schedule.
-    patches = [
-        (runs, "threading", ModelThreading(scheduler, "runs.py", "RunHost._lock", "_Run._decided", events)),
-        (shutdown, "threading", ModelThreading(scheduler, "shutdown.py", "Shutdown", "Shutdown._requested", events)),
-        (runs, "run_process", engine),
-        (runs, "_Run", TrackedRun),
-    ]
-    originals = [(module, name, getattr(module, name)) for module, name, _ in patches]
-    for module, name, value in patches:
-        setattr(module, name, value)
-    try:
+    # Each verified file sees its own stand-ins; the originals come back after the schedule, or from ``watched`` when
+    # the schedule stays stuck (``Heartbeat.patching``).
+    with scheduler.heartbeat.patching() as patch:
+        patch(runs, "threading", ModelThreading(scheduler, "runs.py", "RunHost._lock", "_Run._decided", events))
+        patch(shutdown, "threading", ModelThreading(scheduler, "shutdown.py", "Shutdown", "Shutdown._requested", events))
+        patch(runs, "run_process", engine)
+        patch(runs, "_Run", TrackedRun)
         log = LogSteps(scheduler)
         # Wired as in create_app (app.py): RunHost, then Shutdown.refuse_while(runs.shutdown_refusal).
         stopper = shutdown.Shutdown(log)  # type: ignore[arg-type]
@@ -563,9 +559,6 @@ def harness(scheduler: Scheduler) -> Iterator[World]:
         )
         world_box.append(world)
         yield world
-    finally:
-        for module, name, value in originals:
-            setattr(module, name, value)
 
 
 def _start_tab(world: World, number: int) -> Callable[[], None]:

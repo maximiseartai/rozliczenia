@@ -184,7 +184,9 @@ is the code that made the call. Then sort it into one of three cases:
 - **KROK STOI**: the line names the run, the step it went on from and its stack,
   whose last frames are the call that blocks. A wait the harness does not replace
   (a real lock, `time.sleep`, a network call) is a step the model does not have:
-  replace it in `harness()` or model it on the disk. A loop that never ends is a
+  replace it in `harness()` or model it on the disk. Set a module attribute only
+  through the harness's `patch` (`Heartbeat.patching`): `watched` gives it back
+  when a scope stops, while its thread still waits. A loop that never ends is a
   real bug of the publication code.
 
 ## After changing the checker or an intended change to the publication code

@@ -94,11 +94,15 @@ def test_blokada_spoza_modelu_w_kodzie_pod_sprawdzeniem_konczy_sprawdzenie_kroki
 
     monkeypatch.setattr(explorer.runs.RunHost, "start", start_after_real_event)
     scope = explorer.SCOPES["zamknij-w-trakcie"]
+    replaced = [(explorer.runs, "threading"), (explorer.shutdown, "threading"), (explorer.runs, "run_process"), (explorer.runs, "_Run")]
+    real = [getattr(module, name) for module, name in replaced]
     try:
         report = explorer.explore(scope, step_limit=1.0)
+        # Wątek sprawdzenia wciąż stoi na blokadzie, a następne testy workera już widzą prawdziwe moduły.
+        assert [getattr(module, name) for module, name in replaced] == real
     finally:
         released.set()
-    # Odblokowane sprawdzenie zwija się przy następnym kroku i oddaje podmienione moduły.
+    # Odblokowane sprawdzenie zwija się przy następnym kroku.
     assert wait_for(lambda: all(thread.name != f"sprawdzenie {scope.name}" for thread in threading.enumerate()))
 
     outcome = explorer.summarize([report])

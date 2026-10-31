@@ -10,11 +10,20 @@ zgłasza każde oddanie sterowania wątkowi modelu i każdy powrót. Gdy przez `
 ``watched`` zwraca ``Stuck`` z nazwą wątku modelu, krokiem, od którego ruszył, i jego stosem. Limit liczy się od
 ostatniego tętna, nie od startu, więc sprawdzenie, które na zajętym runnerze idzie wolno, ale idzie, nie staje.
 
-Granica: wątek, który stanął, zostaje w procesie z podmianami swojego sprawdzenia, bo nic nie przerwie blokady
-w kodzie C. Gdy kiedyś ruszy, przy następnym kroku dostaje ``Abandoned`` i zwija się, więc nie miesza już w
-sprawdzeniu, na które nikt nie czeka.
+Sprawdzenie podmienia atrybuty modułów pod sprawdzeniem przez ``Heartbeat.patching``, więc ich oryginały zna też
+``watched``. Gdy sprawdzenie stanie albo czekanie na nie przerwie wyjątek (limit pytest, Ctrl+C), ``watched`` przywraca
+je, zanim wróci, i następne testy workera albo następny zakres widzą prawdziwe moduły.
+
+Granica: wątek, który stanął, zostaje w procesie, bo nic nie przerwie blokady w kodzie C. Gdy kiedyś ruszy, biegnie
+na prawdziwych modułach do następnego kroku modelu, a przy nim dostaje ``Abandoned`` i zwija się, więc nie miesza już
+w sprawdzeniu, na które nikt nie czeka.
 
     import limit_kroku   # skrypt skilla dopisuje tools/ do sys.path
+
+    def explore(scope, heartbeat):
+        with heartbeat.patching() as patch:
+            patch(module, "threading", model_threading)
+            ...
 
     outcome = limit_kroku.watched(lambda heartbeat: explore(scope, heartbeat), limit=10.0, name="sprawdzenie")
     if isinstance(outcome, limit_kroku.Stuck):
@@ -23,7 +32,8 @@ sprawdzeniu, na które nikt nie czeka.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 import sys
 import threading
@@ -49,6 +59,8 @@ class Heartbeat:
         self.actor: str | None = None
         self.step = ""
         self.abandoned = False
+        self._lock = threading.Lock()
+        self._originals: list[tuple[object, str, object]] = []
 
     def entering(self, actor: str, step: str) -> None:
         """Planista oddaje sterowanie wątkowi modelu ``actor``, który rusza od kroku ``step``."""
@@ -64,6 +76,37 @@ class Heartbeat:
 
         self.beats += 1
         self.actor = None
+
+    @contextmanager
+    def patching(self) -> Iterator[Callable[[object, str, object], None]]:
+        """``patch(owner, name, value)`` podmienia atrybut do końca bloku; po porzuceniu przywrócił go już ``abandon``."""
+
+        keep = len(self._originals)
+        try:
+            yield self._patch
+        finally:
+            self._restore(keep)
+
+    def abandon(self) -> None:
+        """Nikt już nie czeka na sprawdzenie: jego wątek zwija się przy następnym kroku, a podmiany wracają od razu."""
+
+        with self._lock:
+            self.abandoned = True
+        self._restore(0)
+
+    def _patch(self, owner: object, name: str, value: object) -> None:
+        with self._lock:
+            if self.abandoned:
+                raise Abandoned
+            self._originals.append((owner, name, getattr(owner, name)))
+            setattr(owner, name, value)
+
+    def _restore(self, keep: int) -> None:
+        # Undone once, by whichever comes first: the block's end in the check's thread or abandon in the waiting one.
+        with self._lock:
+            while len(self._originals) > keep:
+                owner, name, original = self._originals.pop()
+                setattr(owner, name, original)
 
 
 @dataclass(frozen=True)
@@ -113,14 +156,14 @@ def watched(work: Callable[[Heartbeat], T], *, limit: float, name: str) -> T | S
             if heartbeat.beats != beats:
                 beats, since = heartbeat.beats, now
             elif thread.is_alive() and now - since >= limit:
-                heartbeat.abandoned = True
                 frame = sys._current_frames().get(thread.ident or 0)
                 stack = tuple(traceback.format_stack(frame)) if frame is not None else ()
+                heartbeat.abandon()
                 return Stuck(heartbeat.actor, heartbeat.step, limit, stack)
     except BaseException:
         # pytest's limit and Ctrl+C reach only the main thread, so here; without this the check would go on patching
         # modules under the next tests of the worker.
-        heartbeat.abandoned = True
+        heartbeat.abandon()
         raise
     if failure:
         raise failure[0]

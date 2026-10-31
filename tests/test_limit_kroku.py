@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,25 +53,38 @@ def test_limit_pytest_w_watku_czekajacym_porzuca_sprawdzenie_ktore_idzie_dalej(m
 
     join = threading.Thread.join
     waiting = threading.current_thread()
-    steps: list[int] = []
+    module = SimpleNamespace(threading="prawdziwe threading")
+    patched = threading.Event()
+    interrupted = threading.Event()
+    went_on: list[str] = []
 
     def join_until_limit(thread: threading.Thread, timeout: float | None = None) -> None:
-        if threading.current_thread() is waiting and steps:
+        if threading.current_thread() is waiting and patched.is_set():
             raise _Przerwanie
         join(thread, timeout)
 
     def work(heartbeat: limit_kroku.Heartbeat) -> None:
-        while True:
-            heartbeat.entering("karta 1", f"krok {len(steps)}")
-            heartbeat.left()
-            steps.append(len(steps))
+        with heartbeat.patching() as patch:
+            patch(module, "threading", "threading modelu")
+            patched.set()
+            interrupted.wait(60)
+        # Następny harmonogram podmienia moduły na nowo, zanim zrobi pierwszy krok.
+        with heartbeat.patching() as patch:
+            patch(module, "threading", "threading następnego harmonogramu")
+            went_on.append("następny harmonogram")
 
     monkeypatch.setattr(threading.Thread, "join", join_until_limit)
+    try:
+        with pytest.raises(_Przerwanie):
+            limit_kroku.watched(work, limit=10.0, name=STUCK_THREAD)
+        after_interruption = module.threading
+    finally:
+        interrupted.set()
 
-    with pytest.raises(_Przerwanie):
-        limit_kroku.watched(work, limit=10.0, name=STUCK_THREAD)
-
+    assert after_interruption == "prawdziwe threading"
     assert wait_for(_bez_watku_sprawdzenia)
+    assert module.threading == "prawdziwe threading"
+    assert went_on == []
 
 
 def test_sprawdzenie_ktore_idzie_wolno_ale_idzie_trwa_dluzej_niz_limit_kroku() -> None:
@@ -128,3 +142,49 @@ def test_krok_zatrzymany_na_blokadzie_spoza_modelu_konczy_sprawdzenie_bledem_z_w
     # Sprawdzenie, na które nikt już nie czeka, zwija się przy następnym kroku, zamiast iść dalej obok następnego.
     assert wait_for(_bez_watku_sprawdzenia)
     assert went_on == []
+
+
+def test_krok_ktory_stoi_oddaje_podmienione_moduly_nastepnym_testom_choc_jego_watek_wciaz_stoi() -> None:
+    """Wątek, który stanął na blokadzie, nie wychodzi z bloku podmian, więc oryginały przywraca ``watched`` (#52).
+
+    Bez tego następne testy workera dostawały ``threading`` modelu martwego planisty i padały jak flaky testy.
+    """
+
+    module = SimpleNamespace(threading="prawdziwe threading")
+    released = threading.Event()
+
+    def work(heartbeat: limit_kroku.Heartbeat) -> None:
+        with heartbeat.patching() as patch:
+            patch(module, "threading", "threading modelu")
+            heartbeat.entering("karta Uruchom 1", "żądanie POST /api/runs")
+            released.wait(60)
+            heartbeat.entering("karta Uruchom 1", "wejście w blokadę")
+
+    try:
+        outcome = limit_kroku.watched(work, limit=0.5, name=STUCK_THREAD)
+        while_stuck = module.threading
+        # Następny zakres podmienia ten sam atrybut, zanim porzucony wątek ruszy i wyjdzie z bloku podmian.
+        module.threading = "threading następnego zakresu"
+    finally:
+        released.set()
+
+    assert isinstance(outcome, limit_kroku.Stuck)
+    assert while_stuck == "prawdziwe threading"
+    assert wait_for(_bez_watku_sprawdzenia)
+    assert module.threading == "threading następnego zakresu"
+
+
+def test_koniec_wewnetrznego_bloku_podmian_zostawia_podmiany_zewnetrznego() -> None:
+    """Jak ``harness`` publikacji z ``intercepted``: podmiany zewnętrznego bloku trwają do jego końca."""
+
+    module = SimpleNamespace(tempfile="prawdziwy tempfile", stat="prawdziwy os.stat")
+    heartbeat = limit_kroku.Heartbeat()
+
+    with heartbeat.patching() as patch:
+        patch(module, "tempfile", "tempfile modelu")
+        with heartbeat.patching() as inner:
+            inner(module, "stat", "os.stat modelu")
+        after_inner = (module.tempfile, module.stat)
+
+    assert after_inner == ("tempfile modelu", "prawdziwy os.stat")
+    assert (module.tempfile, module.stat) == ("prawdziwy tempfile", "prawdziwy os.stat")

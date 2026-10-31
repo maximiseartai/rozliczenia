@@ -379,13 +379,10 @@ sys.addaudithook(_audit_real_filesystem)
 
 @contextmanager
 def intercepted(disk: VirtualDisk, scheduler: Scheduler) -> Iterator[None]:
-    """Routes os calls for paths under the disk root through the scheduler; other paths are untouched."""
+    """Routes os calls for paths under the disk root through the scheduler; other paths are untouched.
 
-    originals: list[tuple[Any, str, Any]] = []
-
-    def patch(owner: Any, name: str, replacement: Any) -> None:
-        originals.append((owner, name, getattr(owner, name)))
-        setattr(owner, name, replacement)
+    The real calls come back after the block, or from ``watched`` when the schedule stays stuck (``Heartbeat.patching``).
+    """
 
     def read_call(call: str, real: Callable[..., Any], answer: Callable[[object], Any]) -> Callable[..., Any]:
         # The run records what is at the path, not the answer: pathlib asks os.stat on Python 3.11 and 3.12 but
@@ -434,33 +431,28 @@ def intercepted(disk: VirtualDisk, scheduler: Scheduler) -> Iterator[None]:
         entry = disk.entry(path)
         return entry is not None and not entry.is_dir
 
-    # Path.exists/is_symlink/rename/unlink/mkdir reach these on Python 3.11 to 3.14, on Windows and elsewhere.
-    patch(os, "stat", read_call("os.stat", os.stat, disk.stat))
-    patch(os, "lstat", read_call("os.lstat", os.lstat, disk.stat))
-    patch(os.path, "exists", read_call("os.path.exists", os.path.exists, exists))
-    patch(os.path, "lexists", read_call("os.path.lexists", os.path.lexists, exists))
-    patch(os.path, "isdir", read_call("os.path.isdir", os.path.isdir, is_dir))
-    patch(os.path, "isfile", read_call("os.path.isfile", os.path.isfile, is_file))
-    patch(os.path, "islink", read_call("os.path.islink", os.path.islink, lambda path: False))
-    patch(os, "rename", write_call("os.rename", os.rename, lambda s, t: disk.rename(s, t, replace=False), 2))
-    patch(os, "replace", write_call("os.replace", os.replace, lambda s, t: disk.rename(s, t, replace=True), 2))
-    patch(os, "unlink", write_call("os.unlink", os.unlink, disk.unlink, 1))
-    patch(os, "remove", write_call("os.remove", os.remove, disk.unlink, 1))
-    patch(os, "mkdir", write_call("os.mkdir", os.mkdir, disk.mkdir, 1))
-    patch(os, "rmdir", write_call("os.rmdir", os.rmdir, disk.rmdir, 1))
-    for name in ("open", "scandir", "listdir", "link", "symlink", "chmod", "utime", "truncate"):
-        if hasattr(os, name):
-            patch(os, name, unmodeled(f"os.{name}", getattr(os, name)))
-    patch(builtins, "open", unmodeled("open", builtins.open))
-    patch(io, "open", unmodeled("io.open", io.open))
-    global _GUARDED_DISK
-    _GUARDED_DISK = disk
-    try:
+    with scheduler.heartbeat.patching() as patch:
+        # Path.exists/is_symlink/rename/unlink/mkdir reach these on Python 3.11 to 3.14, on Windows and elsewhere.
+        patch(os, "stat", read_call("os.stat", os.stat, disk.stat))
+        patch(os, "lstat", read_call("os.lstat", os.lstat, disk.stat))
+        patch(os.path, "exists", read_call("os.path.exists", os.path.exists, exists))
+        patch(os.path, "lexists", read_call("os.path.lexists", os.path.lexists, exists))
+        patch(os.path, "isdir", read_call("os.path.isdir", os.path.isdir, is_dir))
+        patch(os.path, "isfile", read_call("os.path.isfile", os.path.isfile, is_file))
+        patch(os.path, "islink", read_call("os.path.islink", os.path.islink, lambda path: False))
+        patch(os, "rename", write_call("os.rename", os.rename, lambda s, t: disk.rename(s, t, replace=False), 2))
+        patch(os, "replace", write_call("os.replace", os.replace, lambda s, t: disk.rename(s, t, replace=True), 2))
+        patch(os, "unlink", write_call("os.unlink", os.unlink, disk.unlink, 1))
+        patch(os, "remove", write_call("os.remove", os.remove, disk.unlink, 1))
+        patch(os, "mkdir", write_call("os.mkdir", os.mkdir, disk.mkdir, 1))
+        patch(os, "rmdir", write_call("os.rmdir", os.rmdir, disk.rmdir, 1))
+        for name in ("open", "scandir", "listdir", "link", "symlink", "chmod", "utime", "truncate"):
+            if hasattr(os, name):
+                patch(os, name, unmodeled(f"os.{name}", getattr(os, name)))
+        patch(builtins, "open", unmodeled("open", builtins.open))
+        patch(io, "open", unmodeled("io.open", io.open))
+        patch(sys.modules[__name__], "_GUARDED_DISK", disk)
         yield
-    finally:
-        _GUARDED_DISK = None
-        for owner, name, original in reversed(originals):
-            setattr(owner, name, original)
 
 
 # --- Harness replacements: workbook writing and the staging directory ------------------------------
@@ -525,16 +517,11 @@ def harness(disk: VirtualDisk, scheduler: Scheduler) -> Iterator[None]:
         ) -> _StagingDirectory:
             return _StagingDirectory(disk, scheduler, prefix=prefix, dir=dir, ignore_cleanup_errors=ignore_cleanup_errors)
 
-    replacements: dict[str, Any] = {"_write_period_file": write_period_file, "tempfile": TempfileShim}
-    originals = {name: getattr(preparation_files, name) for name in replacements}
-    for name, value in replacements.items():
-        setattr(preparation_files, name, value)
-    try:
+    with scheduler.heartbeat.patching() as patch:
+        patch(preparation_files, "_write_period_file", write_period_file)
+        patch(preparation_files, "tempfile", TempfileShim)
         with intercepted(disk, scheduler):
             yield
-    finally:
-        for name, value in originals.items():
-            setattr(preparation_files, name, value)
 
 
 def probe_interception() -> list[str]:

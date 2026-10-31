@@ -199,8 +199,10 @@ requests, `wątek Uruchomienie n` is the thread `RunHost.start` spawned,
   its stack, whose last frames are the call that blocks. A wait outside `runs.py`
   and `shutdown.py` (a lock or queue of another module, `time.sleep`, a file or
   network call) is a step the model does not have: replace it in the harness, as
-  `CentrumLog` is, or model it in `ModelThreading`. A loop that never ends is a real
-  bug of the covered code.
+  `CentrumLog` is, or model it in `ModelThreading`. Set a module attribute only
+  through the harness's `patch` (`Heartbeat.patching`): `watched` gives it back when
+  a scope stops, while its thread still waits. A loop that never ends is a real bug
+  of the covered code.
 
 ## After changing the checker or an intended change to the covered code
 
