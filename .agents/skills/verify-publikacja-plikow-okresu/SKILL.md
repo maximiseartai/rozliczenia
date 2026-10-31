@@ -77,10 +77,8 @@ step with `PUBLIKACJA: ZAWIESZENIE`. The first line names the Uruchomienie, its 
 step and where it stands, for example `Uruchomienie procesu u1 po kroku „zapis
 skoroszytu=None” … stoi w [preparation_files.py:LINE _publish]`, and the stack below
 it shows the loop or the wait. The watchdog guards only the script run as its own
-process, because it ends the process. `tests/test_publikacja_plikow_okresu.py` runs
-the check inside pytest, so there a hang still waits for the `timeout = 120` of
-`pyproject.toml`: on Linux and macOS as `Failed: Timeout` of the test, on Windows by
-killing the xdist worker, with the stack that pytest-timeout prints.
+process (`main`: the `ci:` key and the check in `tests/test_publikacja_plikow_okresu.py`),
+because it ends the process.
 
 The last line is the verdict:
 

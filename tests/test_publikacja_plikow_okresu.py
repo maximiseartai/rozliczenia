@@ -40,67 +40,81 @@ def _load_explorer() -> ModuleType:
     return module
 
 
-@pytest.mark.dlugi
-def test_publikacja_plikow_okresu_zachowuje_nienadpisywanie_i_razem_albo_zaden_w_kazdym_harmonogramie(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    explorer = _load_explorer()
-    write_period_files = explorer.preparation_files.write_period_files
-    writing = 0
-    interleaved = False
-
-    def counted(*args: object) -> object:
-        nonlocal writing, interleaved
-        interleaved |= writing > 0
-        writing += 1
-        try:
-            return write_period_files(*args)
-        finally:
-            writing -= 1
-
-    monkeypatch.setattr(explorer.preparation_files, "write_period_files", counted)
-
-    assert explorer.probe_interception() == []
-    outcome = explorer.summarize([explorer.explore(scope) for scope in explorer.SCOPES.values()])
-
-    assert outcome.exit_code == 0, "\n".join(outcome.lines)
-    # Drugie Uruchomienie procesu musi wejść między kroki pierwszego, inaczej zakres dwóch Uruchomień sprawdza tylko
-    # jedno po drugim i OK niczego nie mówi o wyścigu.
-    assert interleaved, "w żadnym harmonogramie drugie Uruchomienie procesu nie ruszyło przed końcem pierwszego"
-
-
-# Sprawdzenie, czy plików okresu nie ma, kręci się tu w pętli bez wywołania systemu plików, więc żaden krok nie wraca.
-SPINNING_PUBLICATION = """
+# Sprawdzenie jako własny proces, jak w CI, bo tylko takiemu strażnik kroku może przerwać kod stojący poza modelem (#84):
+# argumenty to plik sprawdzenia, limit kroku w sekundach i argumenty sprawdzenia, a {change} zmienia kod przed startem.
+DRIVER = """
 import importlib.util, sys
 
 spec = importlib.util.spec_from_file_location("explore_publication", sys.argv[1])
 explorer = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = explorer
 spec.loader.exec_module(explorer)
-explorer.STEP_LIMIT_SECONDS = 2.0
+explorer.STEP_LIMIT_SECONDS = float(sys.argv[2])
+{change}
+raise SystemExit(explorer.main(sys.argv[3:]))
+"""
 
+INTERLEAVED = "drugie Uruchomienie procesu weszło między kroki pierwszego"
+
+# Drukuje INTERLEAVED raz, gdy pierwszy raz write_period_files zaczyna się, zanim skończyło się inne.
+COUNTING_INTERLEAVING = f"""
+write_period_files = explorer.preparation_files.write_period_files
+writing = 0
+interleaved = False
+
+def counted(*args):
+    global writing, interleaved
+    if writing and not interleaved:
+        interleaved = True
+        print("{INTERLEAVED}")
+    writing += 1
+    try:
+        return write_period_files(*args)
+    finally:
+        writing -= 1
+
+explorer.preparation_files.write_period_files = counted
+"""
+
+# Sprawdzenie, czy plików okresu nie ma, kręci się tu w pętli bez wywołania systemu plików, więc żaden krok nie wraca.
+SPINNING = """
 def spinning(files):
     while True:
         pass
 
 explorer.preparation_files.ensure_period_files_absent = spinning
-raise SystemExit(explorer.main(["--scope", "jedno-uruchomienie"]))
 """
 
 
-def test_kod_publikacji_bez_kolejnego_kroku_konczy_sprawdzenie_nazwa_uruchomienia_i_kroku_zamiast_limitu_pytest() -> None:
-    """Sprawdzenie uruchomione jak w CI nie wisi do limitu 120 s pytest, tylko mówi, co stoi i gdzie (#84)."""
-
-    done = subprocess.run(
-        [sys.executable, "-c", SPINNING_PUBLICATION, str(EXPLORER)],
+def _check(limit_s: float, *arguments: str, change: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", DRIVER.format(change=change), str(EXPLORER), str(limit_s), *arguments],
         env={**os.environ, "PYTHONUTF8": "1"},
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=60,
+        timeout=100,
         check=False,
     )
+
+
+@pytest.mark.dlugi
+def test_publikacja_plikow_okresu_zachowuje_nienadpisywanie_i_razem_albo_zaden_w_kazdym_harmonogramie() -> None:
+    # Limit kroku 1 s przy sprawdzeniu dłuższym niż on: strażnik przerywa tylko krok, który nie wraca, nie całe
+    # sprawdzenie (pełne sprawdzenie trwa na Macu około 8 s).
+    done = _check(1.0, change=COUNTING_INTERLEAVING)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    # Drugie Uruchomienie procesu musi wejść między kroki pierwszego, inaczej zakres dwóch Uruchomień sprawdza tylko
+    # jedno po drugim i OK niczego nie mówi o wyścigu.
+    assert INTERLEAVED in done.stdout, "w żadnym harmonogramie drugie Uruchomienie procesu nie ruszyło przed końcem pierwszego"
+
+
+def test_kod_publikacji_bez_kolejnego_kroku_konczy_sprawdzenie_nazwa_uruchomienia_i_kroku_zamiast_limitu_pytest() -> None:
+    """Sprawdzenie nie wisi do limitu 120 s pytest, które wyglądało jak flaky test, tylko mówi, co stoi i gdzie (#84)."""
+
+    done = _check(2.0, "--scope", "jedno-uruchomienie", change=SPINNING)
 
     lines = done.stdout.splitlines()
     assert done.returncode == 3, done.stdout + done.stderr
