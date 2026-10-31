@@ -456,6 +456,23 @@ def test_nowe_centrum_nie_wysyla_kolejki_w_trakcie_przejscia_starego_procesu_tyl
     assert [issue.body.splitlines()[0] for issue in queue.box.issues] == [THREAD.line]
 
 
+def test_plik_blokady_ktorego_nie_da_sie_otworzyc_odklada_wysylke_o_minute_bez_wpisu_o_wyjatku(tmp_path: Path) -> None:
+    queue = Queue(tmp_path, FakeReportBox())
+    queue.queued("treść\n")
+    taken = queue.directory / PASS_LOCK_FILE
+    taken.mkdir()  # open() pada OSError jak na pliku, który trzyma antywirus
+
+    queue.outbox.resume()
+    queue.passed()
+    held = (list(queue.box.issues), queue.clock.wakes, "nieoczekiwany-wyjatek" in queue.log())
+    taken.rmdir()
+    queue.clock.advance(RETRY_S)
+
+    assert held == ([], 1, False)
+    assert queue.box.wait_until(lambda box: len(box.issues) == 1)
+    assert wait_for(lambda: queue.files() == [])
+
+
 def test_kolejka_ktora_zastala_przejscie_drugiej_wysyla_sama_po_minucie(tmp_path: Path) -> None:
     hold = threading.Event()
     queue = Queue(tmp_path, FakeReportBox(open_hold=hold, outcomes=[Unreachable()]))

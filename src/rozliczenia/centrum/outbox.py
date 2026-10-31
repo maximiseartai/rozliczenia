@@ -85,11 +85,17 @@ def _folder_pass(directory: Path) -> Iterator[bool]:
     założyła, i założyłyby je dwa razy. Blokadę trzyma otwarty plik, a nie pamięć procesu, więc wyklucza też
     kolejkę starego procesu Centrum, który po zamknięciu portu jeszcze kończy pracę, gdy nowe już wystartowało
     (#98). Każde przejście otwiera plik od nowa, więc wykluczają się też dwie kolejki jednego procesu, a blokadę
-    procesu, który zginął, zwalnia system. ``False``: blokadę ma inne przejście.
+    procesu, który zginął, zwalnia system. ``False``: blokadę ma inne przejście albo pliku blokady nie da się teraz
+    otworzyć (np. trzyma go antywirus), więc kolejka próbuje znowu po ``RETRY_S``.
     """
 
-    directory.mkdir(parents=True, exist_ok=True)
-    with (directory / PASS_LOCK_FILE).open("a+b") as handle:
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        handle = (directory / PASS_LOCK_FILE).open("a+b")
+    except OSError:
+        yield False
+        return
+    with handle:
         try:
             _lock(handle.fileno())
         except OSError:
@@ -618,8 +624,9 @@ class Outbox:
         (Uruchomienie albo „Wyślij” Uwagi taty), a wątek wysyłki rusza dopiero tutaj, więc ``*.tmp`` tej pracy Centrum
         jeszcze nie ma: każdy został po zapisie przerwanym w poprzedniej pracy Centrum (np. utrata zasilania) albo
         należy do starego procesu, który po zamknięciu portu jeszcze kończy pracę (``_GRACEFUL_SHUTDOWN_S`` w
-        ``server.py``). Takiego zapisu stary proces już nie skończy: jego ``post`` zwraca ``False``, a znacznik
-        dostarczenia przepada (plik i tak usuwa ``_remove``). Plik ``.json`` obok, jeśli jest, ma pełną treść sprzed
+        ``server.py``). Takiego zapisu stary proces już nie skończy: jego ``post`` zwraca ``False``, znacznik
+        dostarczenia przepada (plik i tak usuwa ``_remove``), a numer issue Uwagi po ``Opened`` też, więc następne
+        przejście zakłada jej drugie issue (ryzyko z komentarza w ``_send_all``). Plik ``.json`` obok, jeśli jest, ma pełną treść sprzed
         tego zapisu. Start nie czeka na skrzynkę: pyta ją tylko wątek w tle.
         """
 
@@ -691,7 +698,7 @@ class Outbox:
 
     def _drain(self) -> None:
         while True:
-            elsewhere = False  # przejście innej kolejki tego folderu ma blokadę
+            elsewhere = False  # blokada przejścia nie do wzięcia teraz: ma ją inna kolejka albo plik zajęty
             try:
                 with _folder_pass(self._directory) as alone:
                     elsewhere = not alone

@@ -211,7 +211,8 @@ Slad(s) == slady' = slady \cup {s}
 
 \* outbox.py Outbox._drain: początek pętli while i _folder_pass (flock, na Windows msvcrt.locking, bez
 \* czekania). Kolejka, która zastanie blokadę przejścia innej kolejki tego folderu, także w innym procesie,
-\* nie wysyła, a elsewhere nastawia w Decyzja budzenie za RETRY_S (model: stopped). Kolejka z blokadą
+\* nie wysyła, a elsewhere nastawia w Decyzja budzenie za RETRY_S (model: stopped); OSError otwarcia pliku
+\* blokady (model go pomija) idzie tą samą gałęzią. Kolejka z blokadą
 \* bierze pliki po nazwie: sorted(glob("*.json")) w _send_all (bez *.json.tmp).
 Petla(q) ==
     /\ pc[q] = "petla"
