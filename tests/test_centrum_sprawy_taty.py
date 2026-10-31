@@ -19,7 +19,7 @@ from rozliczenia.centrum.dad_cases import DAD_CASES_FILE, NOTE, OLD_NOTES_FILE, 
 from rozliczenia.centrum.dad_notes import after_delivery, with_logs
 from rozliczenia.centrum.keyed_box import KeyedBox
 from rozliczenia.centrum.log import CentrumLog
-from rozliczenia.centrum.outbox import KnownIssue, NewIssue, Outbox, PeriodThread, Post
+from rozliczenia.centrum.outbox import PASS_LOCK_FILE, KnownIssue, NewIssue, Outbox, PeriodThread, Post
 from rozliczenia.centrum.report_box import (
     Closure,
     CommentOutcome,
@@ -502,7 +502,7 @@ OTHER_TARGETS = {
 
 
 def _queued(tmp_path: Path) -> list[Path]:
-    return sorted((tmp_path / "kolejka").glob("*")) if (tmp_path / "kolejka").exists() else []
+    return sorted(path for path in (tmp_path / "kolejka").glob("*") if path.name != PASS_LOCK_FILE)
 
 
 @pytest.mark.parametrize("target", OTHER_TARGETS.values(), ids=OTHER_TARGETS.keys())

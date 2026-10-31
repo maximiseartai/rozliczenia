@@ -9,13 +9,24 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import threading
 
 import pytest
 
 from rozliczenia.centrum.keyed_box import KeyedBox
 from rozliczenia.centrum.log import CentrumLog
-from rozliczenia.centrum.outbox import RETRY_S, Frame, NewIssue, Outbox, PeriodThread, Post, ReportIssue
+from rozliczenia.centrum.outbox import (
+    PASS_LOCK_FILE,
+    RETRY_S,
+    Frame,
+    NewIssue,
+    Outbox,
+    PeriodThread,
+    Post,
+    ReportIssue,
+)
 from rozliczenia.centrum.report_box import COMMENT_LIMIT, Refused, Rejected, Unreachable
 
 from tests.fixtures.centrum import FakeIssue, FakeReportBox
@@ -62,15 +73,16 @@ class Queue:
         self.delivered: list[tuple[str, int]] = []
         self.outbox = self.restarted()
 
-    def restarted(self) -> Outbox:
-        """Kolejka nowego startu Centrum na tym samym folderze."""
+    def restarted(self, clock: ManualClock | None = None) -> Outbox:
+        """Kolejka nowego startu Centrum na tym samym folderze; ``clock``: zegar nowego procesu, inaczej ten sam."""
 
-        keyed = KeyedBox(self.box, lambda: self.key, clock=self.clock)
+        clock = clock or self.clock
+        keyed = KeyedBox(self.box, lambda: self.key, clock=clock)
         return Outbox(
             self.directory,
             keyed,
             CentrumLog(self.log_path),
-            clock=self.clock,
+            clock=clock,
             on_delivered=lambda post, number: self.delivered.append((post.run_id, number)),
         )
 
@@ -89,7 +101,9 @@ class Queue:
         return names
 
     def files(self) -> list[str]:
-        return sorted(path.name for path in self.directory.glob("*"))
+        """Pliki kolejki bez pliku blokady przejścia, który zostaje w folderze."""
+
+        return sorted(path.name for path in self.directory.glob("*") if path.name != PASS_LOCK_FILE)
 
     def log(self) -> str:
         return self.log_path.read_text(encoding="utf-8") if self.log_path.is_file() else ""
@@ -397,17 +411,66 @@ def test_druga_kolejka_na_tym_folderze_nie_wysyla_pliku_w_trakcie_wysylki_pierws
     assert queue.files() == []
 
 
-def test_przejscie_pominiete_przez_druga_kolejke_robi_pierwsza_po_swoim(tmp_path: Path) -> None:
+# Stary proces Centrum: jego kolejka przy starcie pyta Skrzynkę, która nie odpowiada, i proces czeka na zabicie.
+OLD_CENTRUM = """
+import sys, threading
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from rozliczenia.centrum.clock import SYSTEM_CLOCK
+from rozliczenia.centrum.keyed_box import KeyedBox
+from rozliczenia.centrum.log import CentrumLog
+from rozliczenia.centrum.outbox import Outbox
+
+class Silent:
+    def labelled_issues(self, label, *, include_closed, key):
+        print("pyta", flush=True)
+        threading.Event().wait()
+
+box = KeyedBox(Silent(), lambda: sys.argv[4], clock=SYSTEM_CLOCK)
+Outbox(Path(sys.argv[2]), box, CentrumLog(Path(sys.argv[3])), clock=SYSTEM_CLOCK).resume()
+sys.stdin.read()
+"""
+
+
+def test_nowe_centrum_nie_wysyla_kolejki_w_trakcie_przejscia_starego_procesu_tylko_po_jego_koncu(tmp_path: Path) -> None:
+    # Restart Centrum (#98): stary proces po zamknięciu portu jeszcze kończy przejście kolejki, a nowe już startuje.
+    queue = Queue(tmp_path, FakeReportBox())
+    queue.queued("treść\n")
+    command = [sys.executable, "-c", OLD_CENTRUM, str(ROOT / "src"), str(queue.directory), str(tmp_path / "stary.log"), KEY]
+    with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as old:
+        try:
+            assert old.stdout is not None
+            assert old.stdout.readline() == "pyta\n"
+            queue.outbox.resume()
+            queue.passed()
+            during = (list(queue.box.listed), list(queue.box.issues))
+        finally:
+            old.kill()
+
+    def retried() -> bool:
+        queue.clock.advance(RETRY_S)  # Windows zwalnia blokadę zabitego procesu z opóźnieniem
+        return queue.files() == []
+
+    assert during == ([], [])
+    assert wait_for(retried)
+    assert [issue.body.splitlines()[0] for issue in queue.box.issues] == [THREAD.line]
+
+
+def test_kolejka_ktora_zastala_przejscie_drugiej_wysyla_sama_po_minucie(tmp_path: Path) -> None:
     hold = threading.Event()
     queue = Queue(tmp_path, FakeReportBox(open_hold=hold, outcomes=[Unreachable()]))
     queue.queued("treść\n")
     queue.outbox.resume()
     assert queue.box.opening.wait(30)
-    restarted = queue.restarted()
+    later = ManualClock()  # budzenie pierwszej kolejki nie dzwoni: czas biegnie tylko w procesie drugiej
+    restarted = queue.restarted(later)
     restarted.resume()
     assert not restarted.wait_delivered("", THREAD.label, timeout_s=30)
-
     hold.set()
+    queue.passed()
+    assert queue.box.issues == []
+
+    later.advance(RETRY_S)
 
     assert queue.box.wait_until(lambda box: len(box.issues) == 1)
     assert wait_for(lambda: queue.files() == [])
@@ -574,7 +637,7 @@ def test_wyslanej_wysylki_ktorej_nie_da_sie_usunac_skrzynka_nie_dostaje_drugi_ra
     assert wait_for(lambda: failed_removals() == 1)
     queue.outbox.post(post(["druga\n"]))
     assert wait_for(lambda: failed_removals() == 2)
-    queue.passed()  # inaczej nowa kolejka zastaje przejście tej i oddaje mu swoje (outbox._claimed)
+    queue.passed()  # inaczej nowa kolejka zastaje przejście tej i czeka na budzenie za RETRY_S
     queue.restarted().resume()
     assert wait_for(lambda: failed_removals() == 4)
     monkeypatch.setattr(Path, "unlink", unlink)

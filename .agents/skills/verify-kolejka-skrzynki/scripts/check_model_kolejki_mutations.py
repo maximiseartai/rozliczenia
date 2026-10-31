@@ -2,7 +2,7 @@
 
 Each mutation removes from ``model/KolejkaSkrzynki.tla`` one guard or step whose counterpart in
 ``src/rozliczenia/centrum/outbox.py`` the mutation names, runs on its own copy of the checkout (``tools/mutacje.py``)
-and must end TLC's report with the expected line. Two mutations fix a known finding in the model and must end with
+and must end TLC's report with the expected line. One mutation fixes a known finding in the model and must end with
 ``ZNALEZISKO ZNIKNĘŁO``. A mutation whose anchor text is no longer in the model is reported as NIEAKTUALNA: update
 it to the new model.
 
@@ -50,10 +50,25 @@ MUTATIONS = (
         NEW,
     ),
     Mutation(
-        "_claimed zawsze pozwala wysyłać",
-        (Edit(MODEL, '    /\\ IF passes[Proc(q)] = "wolny"\n', "    /\\ IF TRUE\n"),),
+        "_folder_pass zawsze pozwala wysyłać",
+        (Edit(MODEL, "    /\\ IF blokada = 0\n", "    /\\ IF TRUE\n"),),
         _check("dwie-kolejki"),
         "dwie kolejki jednego folderu wysyłają naraz i zakładają dwa issue okresu",
+        NEW,
+    ),
+    Mutation(
+        "blokada przejścia tylko w pamięci procesu, jak dawne _claimed (_folder_pass bez blokady pliku, #98)",
+        (Edit(MODEL, "    /\\ IF blokada = 0\n", "    /\\ IF blokada = 0 \\/ DwaProcesy\n"),),
+        _check("dwa-procesy"),
+        "stary proces po zamknięciu portu i nowe Centrum wysyłają naraz i zakładają dwa issue okresu",
+        NEW,
+    ),
+    Mutation(
+        "przejście, które zastało blokadę innej kolejki, nie nastawia budzenia (_drain: elsewhere)",
+        (Edit(MODEL, "       ELSE /\\ stopped' = Ustaw(stopped, q, TRUE)\n            /\\ UNCHANGED <<blokada, lista>>\n",
+              "       ELSE /\\ UNCHANGED <<stopped, blokada, lista>>\n"),),
+        _check("dwa-procesy"),
+        "Kontrola ilości, której przejście starego procesu zginęło z nim, czeka w kolejce nowego Centrum do następnej wysyłki",
         NEW,
     ),
     Mutation(
@@ -177,10 +192,10 @@ MUTATIONS = (
             Edit(
                 MODEL,
                 "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, undeleted, rejected, lista, biez, "
-                "bezZnacznika, bezOchrony,\n                   passes, zamkniecia, nadawanie, zgubione, odmowy, "
+                "bezZnacznika, bezOchrony,\n                   blokada, zamkniecia, nadawanie, zgubione, odmowy, "
                 "bledyPliku, wylaczenia>>\n",
                 "    /\\ UNCHANGED <<dysk, issues, zyje, draining, again, armed, undeleted, lista, biez, "
-                "bezZnacznika, bezOchrony,\n                   passes, zamkniecia, nadawanie, zgubione, odmowy, "
+                "bezZnacznika, bezOchrony,\n                   blokada, zamkniecia, nadawanie, zgubione, odmowy, "
                 "bledyPliku, wylaczenia>>\n"
                 '    /\\ pc\'[q] = "plik" \\/ UNCHANGED rejected\n',
             ),
@@ -277,14 +292,6 @@ MUTATIONS = (
         ),
         _check("zgloszenie-w-czesciach"),
         "znane znalezisko „przejecie” znika, a sprawdzenie to mówi",
-        GONE,
-    ),
-    Mutation(
-        "naprawa w modelu: nowe Centrum czeka, aż stary proces się skończy",
-        (Edit(MODEL, "    /\\ IF DwaProcesy \\/ q = 1 THEN MaPort = {} ELSE zyje[1] = \"tak\"\n",
-              "    /\\ IF DwaProcesy \\/ q = 1 THEN \\A r \\in Q : zyje[r] = \"nie\" ELSE zyje[1] = \"tak\"\n"),),
-        _check("dwa-procesy"),
-        "znane znalezisko „dwa_procesy” znika, a sprawdzenie to mówi",
         GONE,
     ),
 )
